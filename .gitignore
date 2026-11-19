@@ -32,6 +32,7 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
 
 # vercel
 .vercel
@@ -39,3 +40,13 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+/src/generated/prisma
+
+# platform smoke-test output (may contain quota headers)
+/scripts/check-platform.out.json
+/scripts/model-bakeoff.out.json
+
+# local databases (test data stays on the machine)
+/prisma/*.db
+/prisma/*.db-journal

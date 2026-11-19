@@ -1,0 +1,105 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- Learning data (unchanged) ----------
+
+model User {
+  id        String    @id @default(cuid())
+  createdAt DateTime  @default(now())
+  coins     Int       @default(240)
+  streak    Int       @default(5)
+  sproutXP  Int       @default(160)
+  unlocked  String    @default("sprout") // comma-separated companion ids
+  answers   Int       @default(0)
+  messages  Message[]
+}
+
+model Message {
+  id        String   @id @default(cuid())
+  userId    String
+  role      String
+  text      String
+  subject   String   @default("General")
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id])
+}
+
+// ---------- Family security (parent account + child device 2FA) ----------
+// Privacy by design: the only personal datum is the parent's login email.
+// Children are stored as a nickname + avatar emoji + grade, never a real name, photo or voice.
+
+model Parent {
+  id            String           @id @default(cuid())
+  email         String           @unique
+  passwordHash  String
+  familyCode    String           @unique
+  failedLogins  Int              @default(0)
+  lockedUntil   DateTime?
+  createdAt     DateTime         @default(now())
+  children      Child[]
+  challenges    LoginChallenge[]
+  devices       TrustedDevice[]
+  events        SecurityEvent[]
+}
+
+model Child {
+  id            String           @id @default(cuid())
+  parentId      String
+  nickname      String
+  avatar        String           @default("🦊")
+  grade         Int              @default(4)
+  language      String           @default("en")
+  dailyLimitMin Int              @default(45)
+  createdAt     DateTime         @default(now())
+  parent        Parent           @relation(fields: [parentId], references: [id], onDelete: Cascade)
+  challenges    LoginChallenge[]
+  devices       TrustedDevice[]
+}
+
+// One 6-digit code sent to the parent each time a child signs in on a new device.
+// The code is stored twice: a salted HMAC for verification, and an AES-GCM ciphertext
+// so it can be shown in the parent's signed-in dashboard. It never appears in logs.
+model LoginChallenge {
+  id          String    @id @default(cuid())
+  parentId    String
+  childId     String
+  codeHash    String
+  codeSealed  String
+  deviceLabel String
+  status      String    @default("pending") // pending | approved | denied | expired | locked
+  attempts    Int       @default(0)
+  expiresAt   DateTime
+  createdAt   DateTime  @default(now())
+  resolvedAt  DateTime?
+  parent      Parent    @relation(fields: [parentId], references: [id], onDelete: Cascade)
+  child       Child     @relation(fields: [childId], references: [id], onDelete: Cascade)
+}
+
+model TrustedDevice {
+  id         String    @id @default(cuid())
+  parentId   String
+  childId    String
+  tokenHash  String    @unique
+  label      String
+  createdAt  DateTime  @default(now())
+  lastSeenAt DateTime  @default(now())
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  parent     Parent    @relation(fields: [parentId], references: [id], onDelete: Cascade)
+  child      Child     @relation(fields: [childId], references: [id], onDelete: Cascade)
+}
+
+model SecurityEvent {
+  id        String   @id @default(cuid())
+  parentId  String
+  type      String
+  detail    String   @default("")
+  createdAt DateTime @default(now())
+  parent    Parent   @relation(fields: [parentId], references: [id], onDelete: Cascade)
+}

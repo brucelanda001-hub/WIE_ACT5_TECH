@@ -1,46 +1,331 @@
+/* EdNova styles: notebook, playful layer, purple sky, sticker album */
 @import "tailwindcss";
 
+/*
+  EdNova design system: "le cahier".
+  Tunisian pupils learn on squared exercise books with a red margin line. The child's space is that page:
+  squared paper, fountain-pen ink blue, the red margin, a yellow highlighter. The parent space uses the
+  same ink on plain paper: calmer, no grid.
+*/
+
 @theme {
-  --font-sans: var(--font-nunito), sans-serif;
-  --font-heading: var(--font-jakarta), sans-serif;
+  --font-sans: var(--font-nunito), "Noto Sans Arabic", system-ui, sans-serif;
+  --font-display: var(--font-baloo), var(--font-nunito), system-ui, sans-serif;
+  --font-arabic: var(--font-noto-ar), var(--font-baloo), sans-serif;
 
-  --color-surface: #f8f9ff;
-  --color-surface-container-lowest: #ffffff;
-  --color-surface-container-low: #eef4ff;
-  --color-surface-container: #e5eeff;
-  --color-surface-container-high: #dee9fc;
-  --color-surface-container-highest: #d8e3f6;
-  
-  --color-on-surface: #111c29;
-  --color-on-surface-variant: #424654;
-  
-  --color-primary: #0055c7;
-  --color-primary-container: #256eec;
-  --color-on-primary: #ffffff;
-  
-  --color-secondary: #af2464;
-  --color-secondary-container: #fe64a2;
-  --color-secondary-fixed: #ffd9e3;
-  --color-on-secondary-fixed: #3e001e;
-  
-  --color-tertiary: #735c00;
-  --color-tertiary-fixed: #ffe087;
-  --color-on-tertiary-fixed: #231a00;
+  --color-paper: #f7f9ff;
+  --color-paper-deep: #eef2ff;
+  --color-sheet: #ffffff;
+  --color-ink: #2340c8;
+  --color-ink-dark: #1a2f99;
+  --color-ink-soft: #dfe5ff;
+  --color-night: #13204a;
+  --color-muted: #55608a;
+  --color-margin: #e8475b;
+  --color-margin-soft: #ffe3e7;
+  --color-marker: #ffd23f;
+  --color-marker-soft: #fff4c2;
+  --color-leaf: #12a57a;
+  --color-leaf-soft: #d9f6ec;
+  --color-line: #d6ddf5;
+  /* Purple: the magic of the child's space (aurora, active tab, send button, Nova's glow) */
+  --color-grape: #7c3aed;
+  --color-grape-dark: #5b21b6;
+  --color-grape-soft: #ede4ff;
 
-  --radius-default: 1rem;
-  --radius-lg: 2rem;
-  --radius-xl: 3rem;
-  --radius-full: 9999px;
+  /* legacy tokens still used by companions/dashboard */
+  --color-surface: #f7f9ff;
+  --color-primary: #2340c8;
+  --color-secondary: #e8475b;
+  --color-tertiary: #b58900;
 
-  --shadow-tactile: 0 4px 0px rgba(39, 50, 64, 0.08), 0 8px 16px rgba(230, 215, 195, 0.4);
+  --radius-note: 6px;
+  --radius-card: 18px;
+  --radius-pill: 999px;
+
+  --shadow-press: 0 4px 0 var(--color-ink-dark);
+  --shadow-sheet: 0 1px 0 #e3e8f8, 0 10px 30px -18px rgba(19, 32, 74, 0.35);
+  --shadow-note: 2px 3px 0 rgba(19, 32, 74, 0.12);
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
 }
 
 body {
-  background-color: var(--color-surface);
-  color: var(--color-on-surface);
+  background: var(--color-paper);
+  color: var(--color-night);
   font-family: var(--font-sans);
 }
 
-h1, h2, h3, h4, h5, h6 {
-  font-family: var(--font-heading);
+h1, h2, h3, h4 {
+  font-family: var(--font-display);
+  letter-spacing: -0.01em;
+}
+
+[dir="rtl"], :lang(ar) {
+  font-family: var(--font-arabic);
+}
+
+/* Squared exercise-book paper with the red margin line */
+.cahier {
+  background-color: var(--color-paper);
+  background-image:
+    linear-gradient(var(--color-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--color-line) 1px, transparent 1px);
+  background-size: 28px 28px;
+  background-position: -1px -1px;
+}
+.cahier-margin {
+  position: relative;
+}
+.cahier-margin::before {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  /* sits 56px inside the content column (--col), like the margin of a real page */
+  inset-inline-start: max(18px, calc(50% - var(--col, 48rem) / 2 + 40px));
+  width: 2px;
+  background: var(--color-margin);
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+/* Highlighter stroke under a word */
+.marker {
+  background: linear-gradient(transparent 58%, var(--color-marker) 58%, var(--color-marker) 92%, transparent 92%);
+  padding-inline: 0.1em;
+}
+
+/* Pressable button: physical, like a sticker that pushes down */
+.btn-press {
+  box-shadow: var(--shadow-press);
+  transition: transform 80ms ease, box-shadow 80ms ease;
+}
+.btn-press:active {
+  transform: translateY(3px);
+  box-shadow: 0 1px 0 var(--color-ink-dark);
+}
+
+/* Sticky-note style used for the child's own messages */
+.note {
+  background: var(--color-marker-soft);
+  border-radius: var(--radius-note);
+  box-shadow: var(--shadow-note);
+}
+
+:focus-visible {
+  outline: 3px solid var(--color-marker);
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+
+@keyframes ink-dot {
+  0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
+  40% { transform: scale(1); opacity: 1; }
+}
+.ink-dot { animation: ink-dot 1.2s infinite ease-in-out; }
+
+@keyframes tile-pop {
+  from { transform: scale(0.92); }
+  to { transform: scale(1); }
+}
+.tile-pop { animation: tile-pop 140ms ease-out; }
+
+/* Landing hero: the lesson writes itself once, step by step (the only autoplay motion) */
+@keyframes hero-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+.hero-step { opacity: 0; animation: hero-in 450ms ease-out forwards; }
+
+@media (prefers-reduced-motion: reduce) {
+  .hero-step { opacity: 1; animation: none; }
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { scrollbar-width: none; }
+
+/* "See it" cards: pieces pop in one by one, only for children who haven't asked for reduced motion */
+@media (prefers-reduced-motion: no-preference) {
+  .see-pop {
+    animation: see-pop 0.35s ease-out both;
+    transform-origin: center;
+    transform-box: fill-box;
+  }
+}
+@keyframes see-pop {
+  from { opacity: 0; transform: scale(0.6); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+/* ---------- Playful layer (child space). The reduced-motion rule above switches all of this off. ---------- */
+
+/* Nova floats, blinks and twinkles */
+@keyframes nova-bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
+.nova-bob { animation: nova-bob 3s ease-in-out infinite; }
+@keyframes nova-blink { 0%, 92%, 100% { transform: scaleY(1); } 95% { transform: scaleY(0.1); } }
+.nova-blink { animation: nova-blink 4.5s infinite; transform-origin: 32px 34px; transform-box: view-box; }
+@keyframes nova-twinkle { 0%, 100% { transform: rotate(0) scale(1); } 50% { transform: rotate(18deg) scale(1.12); } }
+.nova-twinkle { animation: nova-twinkle 2.4s ease-in-out infinite; transform-origin: 32px 10px; transform-box: view-box; }
+/* Tap: a happy jump */
+@keyframes nova-jump {
+  0% { transform: translateY(0) scale(1); }
+  30% { transform: translateY(-22px) scale(1.06) rotate(-6deg); }
+  55% { transform: translateY(0) scale(0.96, 1.04); }
+  75% { transform: translateY(-6px) rotate(4deg); }
+  100% { transform: none; }
+}
+.nova-jump { animation: nova-jump 0.7s ease-out; }
+
+/* Speech bubble text pops in */
+@keyframes bubble-in { from { opacity: 0; transform: translateY(6px) scale(0.97); } to { opacity: 1; transform: none; } }
+.bubble-in { animation: bubble-in 0.3s ease-out; }
+
+/* Question stickers: lift and wiggle on hover, press down on tap */
+.sticker { transition: transform 140ms ease, box-shadow 140ms ease; }
+.sticker:hover { transform: translateY(-3px) rotate(0deg); box-shadow: 6px 7px 0 var(--color-night); }
+.sticker:active { transform: translateY(2px); box-shadow: 1px 1px 0 var(--color-night); }
+@keyframes sticker-wiggle { 0%, 100% { transform: rotate(0); } 25% { transform: rotate(-10deg); } 75% { transform: rotate(10deg); } }
+.sticker:hover .sticker-emoji { animation: sticker-wiggle 0.5s ease-in-out; }
+
+/* Confetti burst for a right answer */
+@keyframes confetti-fly {
+  0% { opacity: 0; transform: translate(0, 0) rotate(0) scale(0.4); }
+  15% { opacity: 1; }
+  100% { opacity: 0; transform: translate(var(--x), var(--y)) rotate(var(--r)) scale(1.1); }
+}
+.confetti-bit { animation: confetti-fly 1.3s cubic-bezier(0.2, 0.7, 0.3, 1) both; }
+
+/* Gentle "look again" shake on a wrong puzzle answer */
+@keyframes puzzle-wiggle { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-6px); } 75% { transform: translateX(6px); } }
+.puzzle-wiggle { animation: puzzle-wiggle 0.35s ease-in-out; }
+
+/* Study buddy breathing break: the circle grows on the in-breath and shrinks on the out-breath (4 s each) */
+.breath-circle { transition: width 4s ease-in-out, height 4s ease-in-out; }
+
+/* ---------- Nova full body (NovaBuddy.tsx) ---------- */
+@keyframes nova-shadow { 0%, 100% { transform: scaleX(1); opacity: .14; } 50% { transform: scaleX(.85); opacity: .09; } }
+.nova-shadow { animation: nova-shadow 3s ease-in-out infinite; transform-origin: 60px 126px; transform-box: view-box; }
+/* idle arms sway a little; raised arms wave */
+@keyframes nova-arm-l { 0%, 100% { transform: rotate(0); } 50% { transform: rotate(6deg); } }
+@keyframes nova-arm-r { 0%, 100% { transform: rotate(0); } 50% { transform: rotate(-6deg); } }
+.nova-arm-l { animation: nova-arm-l 3s ease-in-out infinite; }
+.nova-arm-r { animation: nova-arm-r 3s ease-in-out infinite; }
+@keyframes nova-wave-l { 0%, 100% { transform: rotate(95deg); } 50% { transform: rotate(75deg); } }
+@keyframes nova-wave-r { 0%, 100% { transform: rotate(-95deg); } 50% { transform: rotate(-115deg); } }
+.nova-arm-up-l { animation: nova-wave-l 0.5s ease-in-out infinite; transform: rotate(95deg); }
+.nova-arm-up-r { animation: nova-wave-r 0.5s ease-in-out infinite; transform: rotate(-95deg); }
+/* antenna star: pulses while thinking, spins in colour when celebrating */
+@keyframes nova-antenna-think { 0%, 100% { transform: scale(1); filter: none; } 50% { transform: scale(1.35); filter: drop-shadow(0 0 4px #ffd23f); } }
+.nova-antenna-think { animation: nova-antenna-think 1s ease-in-out infinite; }
+@keyframes nova-antenna-party { from { transform: rotate(0) scale(1.2); filter: hue-rotate(0deg) drop-shadow(0 0 4px #ffd23f); } to { transform: rotate(360deg) scale(1.2); filter: hue-rotate(360deg) drop-shadow(0 0 4px #ffd23f); } }
+.nova-antenna-party { animation: nova-antenna-party 1.2s linear infinite; }
+/* mouth moves while the answer is read aloud */
+@keyframes nova-talk { 0%, 100% { transform: scaleY(0.35); } 50% { transform: scaleY(1.1); } }
+.nova-talk { animation: nova-talk 0.28s ease-in-out infinite; }
+/* the space planet orbits */
+@keyframes nova-orbit { from { transform: rotate(0); } to { transform: rotate(360deg); } }
+.nova-orbit { animation: nova-orbit 8s linear infinite; transform-box: view-box; }
+
+/* ---------- Living purple sky behind the child's space (MagicSky.tsx) ---------- */
+.magic-sky {
+  background: linear-gradient(165deg, #e4d6ff 0%, #e6e4ff 35%, #efe0ff 65%, #fde9f6 100%);
+}
+.sky-blob {
+  position: absolute;
+  width: 70vmax;
+  height: 70vmax;
+  border-radius: 9999px;
+  will-change: transform;
+  animation: sky-drift 26s ease-in-out infinite alternate;
+}
+.sky-blob-1 { left: -20vmax; top: -25vmax; background: radial-gradient(circle, rgb(139 92 246 / 0.62), transparent 62%); }
+.sky-blob-2 { right: -25vmax; top: 10vmax; background: radial-gradient(circle, rgb(99 102 241 / 0.42), transparent 62%); animation-duration: 32s; animation-delay: -8s; }
+.sky-blob-4 { right: 5vmax; top: -30vmax; width: 55vmax; height: 55vmax; background: radial-gradient(circle, rgb(168 85 247 / 0.45), transparent 62%); animation-duration: 29s; animation-delay: -20s; }
+.sky-blob-3 { left: 15vmax; bottom: -35vmax; background: radial-gradient(circle, rgb(217 70 239 / 0.32), transparent 60%); animation-duration: 38s; animation-delay: -15s; }
+@keyframes sky-drift {
+  0% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(6vmax, 4vmax) scale(1.12); }
+  100% { transform: translate(-4vmax, 7vmax) scale(0.95); }
+}
+.sky-bit {
+  animation-name: sky-float, sky-twinkle;
+  animation-timing-function: ease-in-out, ease-in-out;
+  animation-iteration-count: infinite, infinite;
+  animation-direction: alternate, alternate;
+  opacity: 0.6;
+}
+@keyframes sky-float { from { transform: translateY(0) rotate(0deg); } to { transform: translateY(-46px) rotate(25deg); } }
+@keyframes sky-twinkle { from { opacity: 0.45; } to { opacity: 1; } }
+
+/* The notebook stays, but becomes see-through so the sky glows behind it */
+.kid-space .cahier {
+  background-color: rgb(255 255 255 / 0.30);
+  background-image:
+    linear-gradient(rgb(139 92 246 / 0.20) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(139 92 246 / 0.20) 1px, transparent 1px);
+}
+.kid-space .cahier-margin::before { opacity: 0.55; }
+
+/* The magic gradient: active tab, send button, primary actions */
+.bg-magic { background-image: linear-gradient(135deg, var(--color-ink) 0%, var(--color-grape) 100%); color: #fff; }
+.bg-magic:hover { background-image: linear-gradient(135deg, var(--color-ink-dark) 0%, var(--color-grape-dark) 100%); }
+
+/* ---------- Companions: sticker album ---------- */
+.glass-card {
+  background: rgb(255 255 255 / 0.82);
+  backdrop-filter: blur(10px);
+  border: 1.5px solid rgb(255 255 255 / 0.9);
+  box-shadow: 0 1px 0 rgb(19 32 74 / 0.04), 0 22px 44px -26px rgb(91 33 182 / 0.45);
+}
+@keyframes coin-shine { 0%, 80%, 100% { filter: brightness(1); } 88% { filter: brightness(1.25); } }
+.coin-shine { animation: coin-shine 4s ease-in-out infinite; box-shadow: inset 0 -3px 0 rgb(183 121 31 / 0.35); }
+@keyframes garden-sun { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.12); } }
+.garden-sun { animation: garden-sun 5s ease-in-out infinite; }
+@keyframes garden-cloud { from { transform: translateX(-10px); } to { transform: translateX(26px); } }
+.garden-cloud { animation: garden-cloud 12s ease-in-out infinite alternate; }
+@keyframes plant-sway { 0%, 100% { transform: rotate(-3deg); } 50% { transform: rotate(3deg); } }
+.plant-sway { display: inline-block; transform-origin: 50% 100%; animation: plant-sway 3.5s ease-in-out infinite; }
+@keyframes garden-spark { 0%, 100% { opacity: 0; transform: scale(0.6); } 50% { opacity: 1; transform: scale(1); } }
+.garden-spark { animation: garden-spark 2.4s ease-in-out infinite; }
+@keyframes water-drop { 0% { transform: translateY(-20px); opacity: 0; } 15% { opacity: 1; } 100% { transform: translateY(170px); opacity: 0; } }
+.water-drop { animation: water-drop 0.9s ease-in both; }
+.water-btn {
+  background-image: linear-gradient(135deg, #12a57a 0%, #0ea5e9 100%);
+  box-shadow: 0 8px 18px -8px rgb(14 165 233 / 0.8);
+  transition: transform 140ms ease, box-shadow 140ms ease;
+}
+.water-btn:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 12px 22px -8px rgb(14 165 233 / 0.9); }
+.water-btn:active:not(:disabled) { transform: translateY(1px); }
+.water-btn:disabled { background-image: linear-gradient(135deg, #9fb3c8 0%, #b8c4d6 100%); box-shadow: none; }
+.friend-card { transition: transform 180ms ease, box-shadow 180ms ease; box-shadow: 0 16px 34px -24px rgb(91 33 182 / 0.55); }
+.friend-card:hover { transform: translateY(-4px) rotate(-0.6deg); box-shadow: 0 22px 40px -22px rgb(91 33 182 / 0.6); }
+@keyframes friend-glow { 0%, 100% { box-shadow: 0 0 0 0 rgb(124 58 237 / 0.35), 0 16px 34px -24px rgb(91 33 182 / 0.55); } 50% { box-shadow: 0 0 0 8px rgb(124 58 237 / 0), 0 16px 34px -24px rgb(91 33 182 / 0.55); } }
+.friend-ready { animation: friend-glow 2s ease-in-out infinite; }
+@keyframes friend-bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-5px); } }
+.friend-bob { display: inline-block; animation: friend-bob 2.6s ease-in-out infinite; }
+
+
+/* ---------- Phone app (PWA) ---------- */
+html { -webkit-text-size-adjust: 100%; -webkit-tap-highlight-color: transparent; }
+body { overscroll-behavior-y: none; }
+/* no 300 ms tap delay / accidental double-tap zoom on controls (pinch-zoom stays available) */
+button, a, [role="button"], [role="radio"], summary { touch-action: manipulation; }
+/* the app's own chrome is not text to select by accident, answers and inputs still are */
+nav, header, button { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+/* respect notches in landscape */
+.kid-space { padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right); }
+/* typing on a phone: hide the tab bar so the keyboard and the composer have room */
+body:has(#ask:focus) .mobile-tabs { display: none; }
+body:has(#ask:focus) .composer-dock { bottom: 0 !important; }
+@media (display-mode: standalone) {
+  /* installed app: the status bar is ours, keep the sticky header below the notch */
+  header.sticky { padding-top: env(safe-area-inset-top); }
 }

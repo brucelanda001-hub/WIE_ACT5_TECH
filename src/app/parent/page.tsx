@@ -1,370 +1,465 @@
 "use client";
-import { useState, useEffect } from "react";
 import Link from "next/link";
+import { useCallback, useEffect, useState } from "react";
+import { Brand } from "@/components/Brand";
+import { signOut } from "@/components/useKid";
 
-export default function ParentDashboard() {
-  const [openSession, setOpenSession] = useState<number | null>(null);
-  const [audioToggle, setAudioToggle] = useState(true);
-  const [emailToggle, setEmailToggle] = useState(true);
-  const [timeLimit, setTimeLimit] = useState(45);
-  
-  // Fetching dynamic data from the API
-  const [insights, setInsights] = useState<any>(null);
+type Child = { id: string; nickname: string; avatar: string; grade: number; language: string; dailyLimitMin: number };
+type Request = { id: string; code: string; child: { nickname: string; avatar: string }; deviceLabel: string; attempts: number; expiresAt: string };
+type Device = { id: string; label: string; child: { nickname: string; avatar: string }; lastSeenAt: string; expiresAt: string };
+type Event = { id: string; type: string; detail: string; createdAt: string };
+type Metrics = {
+  mode: string;
+  models: { compact: string; mid: string; available: string[]; source: string } | null;
+  configured: boolean;
+  concurrency: { compact: number; mid: number };
+  queue: { compact: number; mid: number };
+  routingTable: { task: string; model: string; why: string }[];
+  metrics: {
+    requests: number;
+    byClass: Record<"compact" | "mid", { calls: number; ok: number; tokensIn: number; tokensOut: number }>;
+    embeddings: { calls: number; ok: number; cached: number };
+    cacheHits: number;
+    coalesced: number;
+    localAnswers: number;
+    refusals: Record<string, number>;
+    handling: Record<string, number>;
+    lastQuota: { remaining: number | null; limit: number | null } | null;
+    split: { compactPct: number; midPct: number };
+    avgLatencyMs: { compact: number; mid: number };
+    cacheHitRate: number;
+    peakQueue: { compact: number; mid: number };
+  };
+};
 
-  useEffect(() => {
-    fetch("/api/insights")
-      .then((res) => res.json())
-      .then((data) => setInsights(data))
-      .catch((err) => console.error("Failed to load insights", err));
+const LANG_NAMES: Record<string, string> = { en: "English", fr: "Français", ar: "العربية", darija: "Darija" };
+const EVENT_TEXT: Record<string, string> = {
+  account_created: "Parent space created",
+  parent_signed_in: "You signed in",
+  account_locked: "Account paused after wrong passwords",
+  child_added: "Learner added",
+  child_removed: "Learner removed",
+  code_sent: "Sign-in code sent",
+  code_denied: "You denied a sign-in",
+  code_locked: "Code locked after 5 wrong tries",
+  device_approved: "New device approved",
+  device_revoked: "Device signed out",
+  child_signed_in: "Child signed in",
+};
+
+const fmtTime = (iso: string) => new Date(iso).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" });
+
+export default function ParentSpace() {
+  const [familyCode, setFamilyCode] = useState("");
+  const [email, setEmail] = useState("");
+  const [requests, setRequests] = useState<Request[]>([]);
+  const [devices, setDevices] = useState<Device[]>([]);
+  const [events, setEvents] = useState<Event[]>([]);
+  const [children, setChildren] = useState<Child[]>([]);
+  const [avatars, setAvatars] = useState<string[]>([]);
+  const [metrics, setMetrics] = useState<Metrics | null>(null);
+  const [now, setNow] = useState(0);
+  const [copied, setCopied] = useState(false);
+  // True while the server can't be reached (restart, Wi-Fi drop): shown as a calm banner, never a silent failure.
+  const [offline, setOffline] = useState(false);
+
+  const loadSecurity = useCallback(async () => {
+    let r: Response;
+    let d: { ok?: boolean; familyCode: string; requests: Request[]; devices: Device[]; events: Event[] };
+    try {
+      r = await fetch("/api/parent/security", { cache: "no-store" });
+      if (r.status === 401) return window.location.assign("/parent/login");
+      d = await r.json();
+    } catch {
+      setOffline(true); // polling continues every 3 s and clears this when the server answers
+      return;
+    }
+    setOffline(false);
+    if (!d.ok) return;
+    setNow(Date.now());
+    setFamilyCode(d.familyCode);
+    setRequests(d.requests);
+    setDevices(d.devices);
+    setEvents(d.events);
   }, []);
 
+  const loadChildren = useCallback(async () => {
+    const d = await fetch("/api/parent/children", { cache: "no-store" })
+      .then((r) => r.json())
+      .catch(() => {
+        setOffline(true);
+        return { ok: false };
+      });
+    if (d.ok) {
+      setChildren(d.children);
+      setAvatars(d.avatars);
+    }
+  }, []);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- initial load from the server
+    fetch("/api/auth/me").then((r) => r.json()).then((d) => d.parent && setEmail(d.parent.email)).catch(() => setOffline(true));
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- initial load from the server
+    loadSecurity();
+    loadChildren();
+    const loadMetrics = () => fetch("/api/metrics", { cache: "no-store" }).then((r) => r.json()).then((d) => d.ok && setMetrics(d)).catch(() => {});
+    loadMetrics();
+    // The sign-in code must appear quickly: poll every 3 s.
+    const a = setInterval(loadSecurity, 3000);
+    const b = setInterval(loadMetrics, 5000);
+    const c = setInterval(() => setNow(Date.now()), 1000);
+    return () => [a, b, c].forEach(clearInterval);
+  }, [loadSecurity, loadChildren]);
+
+  async function act(action: "deny" | "revoke", id: string) {
+    try {
+      await fetch("/api/parent/security", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, id }) });
+    } catch {
+      setOffline(true);
+      return;
+    }
+    loadSecurity();
+  }
+
   return (
-    <main className="w-full pt-20 bg-[#f8f9ff] flex-1 max-w-[1280px] mx-auto px-6">
-      
-      {/* HEADER */}
-      <header className="fixed top-0 left-0 right-0 w-full z-50 bg-white/95 backdrop-blur-xl shadow-[0_4px_20px_rgba(39,50,64,0.06)]">
-        <div className="h-20 max-w-[1280px] mx-auto px-6 flex items-center justify-between gap-6">
-          <div className="flex items-center gap-3 flex-shrink-0">
-            <div className="w-8 h-8 bg-blue-600 rounded-full flex items-center justify-center text-white font-bold">E</div>
-            <span className="text-xl text-blue-600 tracking-tight font-extrabold">EdNova</span>
-          </div>
-          <nav className="hidden lg:flex items-center bg-[#eef4ff] p-1 rounded-full gap-1">
-            <Link href="/dashboard" className="px-4 py-2 rounded-full text-sm font-bold text-gray-600 hover:bg-white transition-all">Dashboard</Link>
-            <Link href="/" className="px-4 py-2 rounded-full text-sm font-bold text-gray-600 hover:bg-white transition-all">Ask EdNova</Link>
-            <Link href="/companions" className="px-4 py-2 rounded-full text-sm font-bold text-gray-600 hover:bg-white transition-all">My Companions</Link>
-            <Link href="/parent" className="px-4 py-2 rounded-full text-sm font-bold bg-blue-600 text-white shadow-[0_3px_0_#00419c]">Parent Insights</Link>
-            <Link href="/explore" className="px-4 py-2 rounded-full text-sm font-bold text-gray-600 hover:bg-white transition-all">Explore Subjects</Link>
-          </nav>
-          <div className="flex items-center gap-3 flex-shrink-0">
-            <button className="w-10 h-10 rounded-full bg-gray-100 hover:bg-gray-200 flex items-center justify-center transition-all" title="Parent Corner">
-              <span className="material-symbols-outlined text-[20px] text-gray-600">verified_user</span>
-            </button>
-            <div className="flex items-center gap-2 bg-white pl-1 pr-3 py-1 rounded-full shadow-sm">
-              <div className="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center text-white text-sm font-bold">A</div>
-              <span className="text-sm font-bold text-gray-800">Alex</span>
-            </div>
-          </div>
+    <div className="min-h-screen bg-paper-deep">
+      <header className="bg-white border-b-2 border-line">
+        <div className="mx-auto max-w-6xl h-[68px] px-5 flex items-center gap-4">
+          <Brand />
+          <span className="hidden sm:inline-flex h-8 px-3 rounded-full bg-ink-soft text-ink text-sm font-extrabold items-center">Parent space</span>
+          <span className="ms-auto hidden md:inline text-sm text-muted truncate">{email}</span>
+          <button onClick={() => signOut("parent")} className="h-12 px-4 rounded-full border-2 border-line font-bold text-sm">Sign out</button>
         </div>
       </header>
+      {offline && (
+        <div role="status" className="bg-marker-soft border-b-2 border-marker">
+          <p className="mx-auto max-w-6xl px-5 py-2.5 text-sm font-bold text-night flex items-center gap-2">
+            <span aria-hidden>🔌</span> Reconnecting to EdNova… This page will update by itself. Nothing is lost.
+          </p>
+        </div>
+      )}
 
-      {/* TOP BANNER */}
-      <div className="w-full bg-[#dee9fc] rounded-2xl p-4 mb-6 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 shadow-sm mt-4">
-        <div className="flex items-center gap-4">
-          <div className="w-10 h-10 rounded-full bg-blue-600 text-white flex items-center justify-center flex-shrink-0 shadow-sm">
-            <span className="material-symbols-outlined text-[22px]">verified_user</span>
-          </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <span className="text-lg font-bold text-gray-800">Parent Corner & Insights</span>
-              <span className="bg-pink-100 text-pink-700 text-xs font-bold px-2 py-0.5 rounded-full">Private Adult View</span>
+      <main className="mx-auto max-w-6xl px-5 py-8 grid lg:grid-cols-[1fr_360px] gap-6 items-start">
+        <div className="space-y-6 min-w-0">
+          {/* Sign-in requests: the 2FA codes */}
+          <section aria-labelledby="req-title" className={`rounded-[var(--radius-card)] p-6 border-2 ${requests.length ? "bg-white border-night shadow-[6px_6px_0_var(--color-night)]" : "bg-white border-line"}`}>
+            <div className="flex items-center gap-3">
+              <span className={`w-3 h-3 rounded-full ${requests.length ? "bg-margin animate-pulse" : "bg-leaf"}`} aria-hidden />
+              <h2 id="req-title" className="text-2xl font-extrabold text-night">Sign-in requests</h2>
             </div>
-            <p className="text-sm text-gray-600">Review learning curiosity, set safe boundaries, and celebrate Alex's discoveries.</p>
-          </div>
-        </div>
-        <div className="flex items-center gap-3 w-full md:w-auto justify-end">
-          <Link href="/dashboard" className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-full shadow-[0_4px_0_#00419c] active:translate-y-1 transition-all text-sm font-bold">
-            <span className="material-symbols-outlined text-[18px]">child_care</span>
-            <span>Return to Learner Mode</span>
-          </Link>
-        </div>
-      </div>
-
-      {/* WEEKLY TARGET */}
-      <div className="w-full bg-white rounded-2xl p-4 mb-6 shadow-sm flex flex-col md:flex-row items-stretch md:items-center justify-between gap-4">
-        <div className="flex items-center gap-4">
-          <div className="w-12 h-12 rounded-full bg-[#ffe087] text-[#735c00] flex items-center justify-center flex-shrink-0">
-            <span className="material-symbols-outlined text-[24px]">flag</span>
-          </div>
-          <div>
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-lg font-bold text-gray-800">Weekly Discovery Target</span>
-              <span className="text-xs font-bold text-yellow-700 bg-yellow-100 px-2 py-0.5 rounded">85% Achieved</span>
-            </div>
-            <p className="text-sm text-gray-500">Last session active: Today, 10:18 AM • Volcanoes & Magma</p>
-          </div>
-        </div>
-        <div className="flex-1 max-w-md flex flex-col gap-1">
-          <div className="flex justify-between text-xs font-bold text-gray-500">
-            <span>Target: 4.5 hours / week</span>
-            <span className="text-blue-600">3h 45m / 4h 30m</span>
-          </div>
-          <div className="w-full h-3.5 bg-gray-100 rounded-full overflow-hidden p-0.5">
-            <div className="h-full bg-blue-600 rounded-full transition-all duration-700" style={{ width: "85%" }}></div>
-          </div>
-        </div>
-      </div>
-
-      {/* METRICS CARDS */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-        <div className="bg-white rounded-2xl p-4 shadow-sm flex flex-col justify-between hover:-translate-y-0.5 transition-all">
-          <div>
-            <div className="flex items-center justify-between mb-4">
-              <span className="w-10 h-10 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center">
-                <span className="material-symbols-outlined text-[22px]">schedule</span>
-              </span>
-              <span className="flex items-center text-blue-600 text-xs font-bold bg-blue-50 px-2 py-0.5 rounded-full">
-                <span className="material-symbols-outlined text-[14px]">trending_up</span> +25%
-              </span>
-            </div>
-            <span className="text-xs font-bold text-gray-400 uppercase tracking-wider">Time This Week</span>
-            <div className="text-4xl font-extrabold text-gray-800 leading-tight mt-1">{insights?.stats?.timeSpent || "3h 45m"}</div>
-          </div>
-          <p className="text-xs text-gray-500 mt-4">Healthy daily pacing. Peak session length: 22 mins.</p>
-        </div>
-
-        <div className="bg-white rounded-2xl p-4 shadow-sm flex flex-col justify-between hover:-translate-y-0.5 transition-all">
-          <div>
-            <div className="flex items-center justify-between mb-4">
-              <span className="w-10 h-10 rounded-full bg-pink-100 text-pink-600 flex items-center justify-center">
-                <span className="material-symbols-outlined text-[22px]">psychology_alt</span>
-              </span>
-              <span className="text-pink-600 text-xs font-bold bg-pink-50 px-2 py-0.5 rounded-full">4 Subjects</span>
-            </div>
-            <span className="text-xs font-bold text-gray-400 uppercase tracking-wider">Inquiries & Solves</span>
-            <div className="text-4xl font-extrabold text-gray-800 leading-tight mt-1">{insights?.stats?.questionsAsked || 42} Qs</div>
-          </div>
-          <p className="text-xs text-gray-500 mt-4">High inquiry velocity. 92% solved with guided step hints.</p>
-        </div>
-
-        <div className="bg-white rounded-2xl p-4 shadow-sm flex flex-col justify-between hover:-translate-y-0.5 transition-all">
-          <div>
-            <div className="flex items-center justify-between mb-4">
-              <span className="w-10 h-10 rounded-full bg-yellow-100 text-yellow-700 flex items-center justify-center">
-                <span className="material-symbols-outlined text-[22px]">menu_book</span>
-              </span>
-              <span className="text-yellow-700 text-xs font-bold bg-yellow-50 px-2 py-0.5 rounded-full">New Mastery</span>
-            </div>
-            <span className="text-xs font-bold text-gray-400 uppercase tracking-wider">Vocabulary & Rules</span>
-            <div className="text-4xl font-extrabold text-gray-800 leading-tight mt-1">{insights?.stats?.conceptsMastered || 18} Items</div>
-          </div>
-          <div className="flex flex-wrap gap-1 mt-4">
-            <span className="text-xs font-bold bg-gray-100 px-2 py-0.5 rounded text-gray-700">Photosynthesis</span>
-            <span className="text-xs font-bold bg-gray-100 px-2 py-0.5 rounded text-gray-700">Fractions</span>
-          </div>
-        </div>
-
-        <div className="bg-white rounded-2xl p-4 shadow-sm flex flex-col justify-between hover:-translate-y-0.5 transition-all">
-          <div>
-            <div className="flex items-center justify-between mb-4">
-              <span className="w-10 h-10 rounded-full bg-gray-100 text-blue-600 flex items-center justify-center">
-                <span className="material-symbols-outlined text-[22px]">savings</span>
-              </span>
-              <span className="text-yellow-700 text-xs font-bold bg-yellow-50 px-2 py-0.5 rounded-full">Saver Trait</span>
-            </div>
-            <span className="text-xs font-bold text-gray-400 uppercase tracking-wider">Earned & Saved</span>
-            <div className="text-4xl font-extrabold text-gray-800 leading-tight mt-1">{insights?.stats?.coinsEarned || 240} Coins</div>
-          </div>
-          <p className="text-xs text-gray-500 mt-4">Saving up for <strong>Barnaby the Owl</strong> companion (Goal: 300).</p>
-        </div>
-      </div>
-
-      {/* SECTION 2: Breakdown & Safety */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 mb-8 items-start">
-        <div className="lg:col-span-7 bg-white rounded-2xl p-6 shadow-sm flex flex-col gap-4">
-          <div className="flex items-center justify-between">
-            <div>
-              <span className="text-xs font-bold text-blue-600 uppercase tracking-wider">Cognitive Footprint</span>
-              <h2 className="text-2xl font-bold text-gray-800">Subject-Level Curiosity Breakdown</h2>
-            </div>
-          </div>
-          <p className="text-sm text-gray-500">Alex has gravitated toward Earth sciences this week following a natural curiosity about rock formations.</p>
-          
-          <div className="flex flex-col gap-4 mt-2">
-            {insights?.breakdown ? insights.breakdown.map((item: any, i: number) => (
-              <div key={i}>
-                <div className="flex items-center justify-between text-sm font-bold mb-1">
-                  <span className="flex items-center gap-2 text-gray-800"><span className={`w-3 h-3 rounded-full ${item.color}`}></span> {item.subject}</span>
-                  <span className="text-gray-600">{item.percentage}%</span>
-                </div>
-                <div className="w-full h-3 bg-gray-100 rounded-full overflow-hidden">
-                  <div className={`h-full ${item.color} rounded-full`} style={{ width: `${item.percentage}%` }}></div>
-                </div>
-              </div>
-            )) : (
-              <p className="text-sm text-gray-500">Loading breakdown...</p>
+            {requests.length === 0 ? (
+              <p className="mt-2 text-muted">
+                No one is waiting. When your child signs in on a new device, a 6-digit code appears here. Read it to them, or type it on their device yourself.
+              </p>
+            ) : (
+              <ul className="mt-5 space-y-5">
+                {requests.map((r) => {
+                  const left = Math.max(0, Math.round((Date.parse(r.expiresAt) - now) / 1000));
+                  return (
+                    <li key={r.id} className="grid sm:grid-cols-[1fr_auto] gap-4 items-center">
+                      <div>
+                        <p className="text-lg text-night">
+                          <span className="text-2xl me-1" aria-hidden>{r.child.avatar}</span>
+                          <strong>{r.child.nickname}</strong> wants to sign in on <strong>{r.deviceLabel}</strong>
+                        </p>
+                        <div className="mt-3 flex gap-2" dir="ltr" aria-label={`Code ${r.code.split("").join(" ")}`}>
+                          {r.code.split("").map((d, i) => (
+                            <span key={i} className="w-12 h-16 sm:w-14 sm:h-[72px] rounded-xl bg-marker-soft border-[3px] border-night grid place-items-center text-4xl font-extrabold font-[family-name:var(--font-display)] text-night">
+                              {d}
+                            </span>
+                          ))}
+                        </div>
+                        <p className={`mt-2 text-sm font-bold tabular-nums ${left < 60 ? "text-margin" : "text-muted"}`}>
+                          Expires in {Math.floor(left / 60)}:{String(left % 60).padStart(2, "0")}
+                          {r.attempts > 0 ? ` · ${r.attempts} wrong ${r.attempts === 1 ? "try" : "tries"}` : ""}
+                        </p>
+                      </div>
+                      <button onClick={() => act("deny", r.id)} className="h-14 px-6 rounded-full border-2 border-margin text-margin font-extrabold hover:bg-margin-soft">
+                        Deny, this wasn&apos;t us
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
             )}
-          </div>
+          </section>
+
+          <Learners learners={children} avatars={avatars} reload={loadChildren} />
+
+          <AiPanel m={metrics} />
         </div>
 
-        <div className="lg:col-span-5 flex flex-col gap-4">
-          <div className="bg-white rounded-2xl p-6 shadow-sm">
-            <div className="flex items-start gap-3 mb-4">
-              <div className="w-10 h-10 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center shrink-0">
-                <span className="material-symbols-outlined text-[22px]">shield_lock</span>
-              </div>
-              <div>
-                <h3 className="text-lg font-bold text-gray-800">EdNova Safety & Guardrails</h3>
-                <p className="text-sm text-gray-500">Active protection filter for 4th-grade comprehension.</p>
-              </div>
-            </div>
-            <div className="bg-gray-50 rounded-xl p-3 flex flex-col gap-2 mb-4">
-              <div className="flex items-center gap-2 text-blue-600 text-xs font-bold">
-                <span className="material-symbols-outlined text-[16px]">check_circle</span>
-                <span>100% Child-Safe Filtered Responses</span>
-              </div>
-              <p className="text-xs text-gray-500 pl-6">All dynamic AI prompts are sandboxed to neutral, age-graded pedagogy vetted by specialists.</p>
-            </div>
-            <div className="flex items-center justify-between pt-2">
-              <span className="text-xs font-bold text-gray-500">Language Difficulty Level</span>
-              <span className="text-sm font-bold text-gray-800 bg-gray-100 px-2 py-1 rounded">Lexile 650L–800L</span>
-            </div>
-          </div>
-
-          <div className="bg-white rounded-2xl p-6 shadow-sm flex items-center gap-4">
-            <div className="w-16 h-16 rounded-full bg-orange-100 flex items-center justify-center text-3xl shrink-0 shadow-inner">🐘</div>
-            <div>
-              <span className="text-xs font-bold text-pink-600 uppercase">Companion Feedback</span>
-              <h4 className="text-lg font-bold text-gray-800 leading-snug">Barnaby the Elephant</h4>
-              <p className="text-sm text-gray-500 mt-1">"Alex asks really great 'why' questions and always checks twice before moving past fractions!"</p>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* SECTION 3: Recent Sessions */}
-      <div className="w-full bg-white rounded-2xl p-6 shadow-sm mb-8">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
-          <div>
-            <span className="text-xs font-bold text-blue-600 uppercase tracking-wider">Chronological Feed</span>
-            <h2 className="text-2xl font-bold text-gray-800">Recent Learning Sessions</h2>
-          </div>
-        </div>
-
-        <div className="flex flex-col gap-4">
-          <div className="bg-gray-50 rounded-xl p-4 transition-all">
-            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-              <div className="flex items-start gap-4">
-                <span className="w-10 h-10 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center shrink-0">
-                  <span className="material-symbols-outlined text-[20px]">volcano</span>
-                </span>
-                <div>
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-lg font-bold text-gray-800">Volcanoes & Magma</span>
-                    <span className="bg-blue-200 text-blue-800 text-xs font-bold px-2 py-0.5 rounded">Science</span>
-                  </div>
-                  <p className="text-sm text-gray-500 mt-1">Today, 10:14 AM — Discovered the difference between magma and lava.</p>
-                </div>
-              </div>
-              <button 
-                onClick={() => setOpenSession(openSession === 1 ? null : 1)}
-                className="flex items-center gap-2 text-blue-600 font-bold text-sm bg-white px-4 py-2 rounded-full shadow-sm hover:bg-gray-100 transition-all self-start md:self-auto"
+        <aside className="space-y-6">
+          <section className="rounded-[var(--radius-card)] bg-ink text-white p-6">
+            <h2 className="text-lg font-extrabold">Family code</h2>
+            <p className="text-white/80 text-sm mt-1">Your child types this first. It only reveals nicknames, and each sign-in still needs your 6-digit code.</p>
+            <div className="mt-4 flex items-center gap-2">
+              <span className="flex-1 h-14 rounded-xl bg-white/10 border-2 border-white/30 grid place-items-center text-2xl font-extrabold tracking-[0.12em] font-[family-name:var(--font-display)]">{familyCode || "…"}</span>
+              <button
+                onClick={() => {
+                  navigator.clipboard?.writeText(familyCode);
+                  setCopied(true);
+                  setTimeout(() => setCopied(false), 1500);
+                }}
+                className="h-14 px-4 rounded-xl bg-marker text-night font-extrabold"
               >
-                <span>{openSession === 1 ? "Hide Transcript" : "Review Conversation"}</span>
-                <span className="material-symbols-outlined text-[18px]">{openSession === 1 ? "expand_less" : "expand_more"}</span>
+                {copied ? "Copied" : "Copy"}
               </button>
             </div>
-            
-            {openSession === 1 && (
-              <div className="mt-4 pt-4 border-t border-gray-200 flex flex-col gap-3">
-                <div className="flex items-start gap-2">
-                  <span className="w-7 h-7 rounded-full bg-blue-600 text-white flex items-center justify-center text-xs font-bold shrink-0">A</span>
-                  <div className="bg-white rounded-lg p-3 max-w-xl shadow-sm">
-                    <p className="text-sm text-gray-800 font-semibold">Alex: "Is magma hotter than pizza oven fire?"</p>
-                  </div>
-                </div>
-                <div className="flex items-start gap-2 pl-4">
-                  <span className="w-7 h-7 rounded-full bg-pink-500 text-white flex items-center justify-center text-xs font-bold shrink-0">E</span>
-                  <div className="bg-gray-100 rounded-lg p-3 max-w-xl shadow-sm">
-                    <p className="text-sm text-gray-800"><strong>EdNova:</strong> "Yes, Alex! Magma can reach 1,300°F—way hotter than a pizza oven! But rock melts slowly like thick butter."</p>
-                  </div>
-                </div>
-              </div>
+          </section>
+
+          <section className="rounded-[var(--radius-card)] bg-white border-2 border-line p-6">
+            <h2 className="text-lg font-extrabold text-night">Trusted devices</h2>
+            <p className="text-sm text-muted">Approved by you. Each stays trusted for 30 days.</p>
+            {devices.length === 0 ? (
+              <p className="mt-3 text-sm text-muted">No devices yet.</p>
+            ) : (
+              <ul className="mt-3 divide-y-2 divide-line">
+                {devices.map((d) => (
+                  <li key={d.id} className="py-3 flex items-center gap-3">
+                    <span className="text-2xl" aria-hidden>{d.child.avatar}</span>
+                    <div className="flex-1 min-w-0">
+                      <p className="font-bold text-night truncate">{d.label}</p>
+                      <p className="text-xs text-muted">{d.child.nickname} · last used {fmtTime(d.lastSeenAt)}</p>
+                    </div>
+                    <button onClick={() => act("revoke", d.id)} className="h-12 px-3 rounded-full border-2 border-line text-sm font-bold hover:border-margin hover:text-margin">
+                      Sign out
+                    </button>
+                  </li>
+                ))}
+              </ul>
             )}
-          </div>
+          </section>
 
-          <div className="bg-gray-50 rounded-xl p-4 transition-all">
-            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-              <div className="flex items-start gap-4">
-                <span className="w-10 h-10 rounded-full bg-pink-100 text-pink-600 flex items-center justify-center shrink-0">
-                  <span className="material-symbols-outlined text-[20px]">calculate</span>
-                </span>
-                <div>
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-lg font-bold text-gray-800">Dividing Fractions</span>
-                    <span className="bg-pink-200 text-pink-800 text-xs font-bold px-2 py-0.5 rounded">Math</span>
-                  </div>
-                  <p className="text-sm text-gray-500 mt-1">Yesterday, 4:20 PM — Answered 11 of 12 practice questions correctly.</p>
-                </div>
-              </div>
-              <span className="text-xs font-bold text-gray-400 self-start md:self-auto px-2">Archived</span>
-            </div>
-          </div>
-        </div>
+          <section className="rounded-[var(--radius-card)] bg-white border-2 border-line p-6">
+            <h2 className="text-lg font-extrabold text-night">Security log</h2>
+            <ul className="mt-3 space-y-2.5">
+              {events.map((e) => (
+                <li key={e.id} className="text-sm">
+                  <p className="font-bold text-night">{EVENT_TEXT[e.type] ?? e.type}</p>
+                  <p className="text-xs text-muted">{fmtTime(e.createdAt)}{e.detail ? ` · ${e.detail}` : ""}</p>
+                </li>
+              ))}
+            </ul>
+          </section>
+
+          <section className="rounded-[var(--radius-card)] bg-leaf-soft p-6">
+            <h2 className="text-lg font-extrabold text-night">What EdNova keeps</h2>
+            <ul className="mt-2 text-sm text-night space-y-1.5 list-disc ps-5">
+              <li>Your email and a hashed password.</li>
+              <li>Each child&apos;s nickname, emoji, grade and language. No real name, photo or voice.</li>
+              <li>Questions are not stored. Emails, phone numbers and names typed by a child are masked before the AI sees them.</li>
+              <li>Read-aloud runs in the browser and is never recorded.</li>
+            </ul>
+          </section>
+        </aside>
+      </main>
+    </div>
+  );
+}
+
+function Learners({ learners, avatars, reload }: { learners: Child[]; avatars: string[]; reload: () => void }) {
+  const [nickname, setNickname] = useState("");
+  const [avatar, setAvatar] = useState("🦊");
+  const [grade, setGrade] = useState(4);
+  const [language, setLanguage] = useState("en");
+  const [error, setError] = useState("");
+  const [open, setOpen] = useState(false);
+
+  async function add(e: React.FormEvent) {
+    e.preventDefault();
+    setError("");
+    const d = await fetch("/api/parent/children", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ nickname, avatar, grade, language }),
+    }).then((r) => r.json());
+    if (!d.ok) return setError(d.error);
+    setNickname("");
+    setOpen(false);
+    reload();
+  }
+
+  async function update(id: string, patch: Partial<Child>) {
+    await fetch("/api/parent/children", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, ...patch }) });
+    reload();
+  }
+
+  async function remove(c: Child) {
+    if (!confirm(`Remove ${c.nickname}? Their devices will be signed out.`)) return;
+    await fetch(`/api/parent/children?id=${c.id}`, { method: "DELETE" });
+    reload();
+  }
+
+  return (
+    <section aria-labelledby="kids-title" className="rounded-[var(--radius-card)] bg-white border-2 border-line p-6">
+      <div className="flex items-center gap-3">
+        <h2 id="kids-title" className="text-2xl font-extrabold text-night">Learners</h2>
+        <button onClick={() => setOpen((o) => !o)} className="ms-auto h-12 px-4 rounded-full bg-ink text-white font-bold">
+          {open ? "Close" : "+ Add a learner"}
+        </button>
       </div>
 
-      {/* SECTION 4: Parental Controls */}
-      <div className="w-full bg-white rounded-2xl p-6 shadow-sm mb-10">
-        <div className="flex items-center gap-3 mb-6">
-          <div className="w-10 h-10 rounded-full bg-gray-100 text-gray-700 flex items-center justify-center shrink-0">
-            <span className="material-symbols-outlined text-[22px]">tune</span>
-          </div>
+      {learners.length === 0 && !open && <p className="mt-2 text-muted">Add a learner so your child can sign in. Use a nickname, not their real name.</p>}
+
+      <ul className="mt-4 grid sm:grid-cols-2 gap-3">
+        {learners.map((c) => (
+          <li key={c.id} className="rounded-2xl bg-paper border-2 border-line p-4">
+            <div className="flex items-center gap-3">
+              <span className="w-12 h-12 rounded-full bg-marker-soft grid place-items-center text-3xl" aria-hidden>{c.avatar}</span>
+              <div className="flex-1">
+                <p className="text-lg font-extrabold text-night">{c.nickname}</p>
+                <p className="text-sm text-muted">Grade {c.grade} · {LANG_NAMES[c.language] ?? c.language}</p>
+              </div>
+              <button onClick={() => remove(c)} aria-label={`Remove ${c.nickname}`} className="w-12 h-12 rounded-full text-muted hover:text-margin hover:bg-margin-soft text-xl">×</button>
+            </div>
+            <label className="mt-3 block text-sm font-bold text-night">
+              Daily time: {c.dailyLimitMin} min
+              <input type="range" min={10} max={120} step={5} defaultValue={c.dailyLimitMin} onMouseUp={(e) => update(c.id, { dailyLimitMin: Number((e.target as HTMLInputElement).value) })} onTouchEnd={(e) => update(c.id, { dailyLimitMin: Number((e.target as HTMLInputElement).value) })} className="w-full accent-[var(--color-ink)] h-8" />
+            </label>
+          </li>
+        ))}
+      </ul>
+
+      {open && (
+        <form onSubmit={add} className="mt-4 rounded-2xl border-2 border-dashed border-ink p-4 space-y-4">
           <div>
-            <h2 className="text-2xl font-bold text-gray-800">Parental Controls & Healthy Balance</h2>
-            <p className="text-sm text-gray-500">Calibrate learning limits and feedback preferences.</p>
+            <label htmlFor="nick" className="block font-bold text-night">Nickname</label>
+            <input id="nick" value={nickname} onChange={(e) => setNickname(e.target.value)} maxLength={24} placeholder="e.g. Star Fox" className="mt-1 w-full h-14 rounded-xl border-2 border-line px-4 text-lg focus:border-ink focus:outline-none" />
+            <p className="text-xs text-muted mt-1">Not their real name. Kids recognise themselves by the emoji.</p>
           </div>
+          <fieldset>
+            <legend className="font-bold text-night">Emoji</legend>
+            <div className="mt-1 flex flex-wrap gap-2">
+              {avatars.map((a) => (
+                <button type="button" key={a} onClick={() => setAvatar(a)} aria-pressed={avatar === a} className={`w-14 h-14 rounded-xl text-3xl border-2 ${avatar === a ? "border-ink bg-ink-soft" : "border-line bg-white"}`}>
+                  {a}
+                </button>
+              ))}
+            </div>
+          </fieldset>
+          <div className="grid grid-cols-2 gap-3">
+            <label className="font-bold text-night">
+              Grade
+              <select value={grade} onChange={(e) => setGrade(Number(e.target.value))} className="mt-1 w-full h-14 rounded-xl border-2 border-line px-3 bg-white">
+                {[1, 2, 3, 4, 5, 6].map((g) => <option key={g} value={g}>Grade {g}</option>)}
+              </select>
+            </label>
+            <label className="font-bold text-night">
+              Language
+              <select value={language} onChange={(e) => setLanguage(e.target.value)} className="mt-1 w-full h-14 rounded-xl border-2 border-line px-3 bg-white">
+                {Object.entries(LANG_NAMES).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+              </select>
+            </label>
+          </div>
+          {error && <p role="alert" className="rounded-xl bg-margin-soft px-4 py-2 font-semibold text-night">{error}</p>}
+          <button className="btn-press w-full h-14 rounded-full bg-ink text-white font-extrabold">Add learner</button>
+        </form>
+      )}
+    </section>
+  );
+}
+
+function Stat({ label, value, sub }: { label: string; value: string | number; sub?: string }) {
+  return (
+    <div className="rounded-2xl bg-paper p-4">
+      <p className="text-sm font-bold text-muted">{label}</p>
+      <p className="text-3xl font-extrabold text-night font-[family-name:var(--font-display)] tabular-nums leading-tight">{value}</p>
+      {sub && <p className="text-xs text-muted">{sub}</p>}
+    </div>
+  );
+}
+
+function AiPanel({ m }: { m: Metrics | null }) {
+  const [showTable, setShowTable] = useState(false);
+  if (!m) return null;
+  const s = m.metrics;
+  const totalCalls = s.byClass.compact.calls + s.byClass.mid.calls;
+  const tokens = s.byClass.compact.tokensIn + s.byClass.compact.tokensOut + s.byClass.mid.tokensIn + s.byClass.mid.tokensOut;
+  const refusals = Object.values(s.refusals).reduce((a, b) => a + b, 0);
+  return (
+    <section aria-labelledby="ai-title" className="rounded-[var(--radius-card)] bg-white border-2 border-line p-6">
+      <div className="flex flex-wrap items-center gap-3">
+        <h2 id="ai-title" className="text-2xl font-extrabold text-night">How the AI was used</h2>
+        <span className={`h-8 px-3 rounded-full text-xs font-extrabold inline-flex items-center ${m.mode === "mock" ? "bg-marker-soft text-night" : "bg-leaf-soft text-night"}`}>
+          {m.mode === "mock" ? "Offline rehearsal mode" : "Live platform"}
+        </span>
+        <Link href="/api/metrics" className="ms-auto text-sm font-bold text-ink underline underline-offset-4">Raw metrics (JSON)</Link>
+      </div>
+      {m.models && (
+        <p className="mt-2 text-sm text-night">
+          ⚡ Compact: <strong>{m.models.compact}</strong> · 🧠 Mid-size: <strong>{m.models.mid}</strong>
+          {m.models.source === "platform" ? " (picked from the platform's model list)" : ""}
+        </p>
+      )}
+      <p className="mt-1 text-sm text-muted">Since the server started. Quick questions go to the compact model; only reasoning and final writing use the mid-size model.</p>
+
+      <div className="mt-4">
+        <div className="flex justify-between text-sm font-bold text-night">
+          <span>⚡ Compact {s.split.compactPct}% ({s.byClass.compact.calls})</span>
+          <span>🧠 Mid-size {s.split.midPct}% ({s.byClass.mid.calls})</span>
         </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          <div className="bg-gray-50 rounded-xl p-4 flex flex-col justify-between">
-            <div>
-              <div className="flex items-center justify-between mb-2">
-                <span className="font-bold text-gray-800">Daily Pacing Limit</span>
-                <span className="bg-blue-600 text-white text-xs font-bold px-2 py-0.5 rounded-full">{timeLimit} Mins</span>
-              </div>
-              <p className="text-xs text-gray-500 mb-4">Gentle pause prompt when session reaches target.</p>
-            </div>
-            <input 
-              type="range" min="20" max="90" step="5" 
-              value={timeLimit} 
-              onChange={(e) => setTimeLimit(Number(e.target.value))}
-              className="w-full accent-blue-600 cursor-pointer" 
-            />
-          </div>
-
-          <div className="bg-gray-50 rounded-xl p-4 flex flex-col justify-between">
-            <div>
-              <div className="flex items-center justify-between mb-2">
-                <span className="font-bold text-gray-800">Audio Celebration</span>
-                <span className="text-pink-600 text-xs font-bold bg-pink-100 px-2 py-0.5 rounded-full">Enabled</span>
-              </div>
-              <p className="text-xs text-gray-500 mb-4">Plays cheerful trumpet chimes when solving difficult questions.</p>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-sm text-gray-700 font-bold">Audio Cues</span>
-              <button onClick={() => setAudioToggle(!audioToggle)} className={`w-11 h-6 rounded-full transition-colors relative ${audioToggle ? "bg-pink-500" : "bg-gray-300"}`}>
-                <span className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform ${audioToggle ? "translate-x-5" : "translate-x-0"}`}></span>
-              </button>
-            </div>
-          </div>
-
-          <div className="bg-gray-50 rounded-xl p-4 flex flex-col justify-between">
-            <div>
-              <div className="flex items-center justify-between mb-2">
-                <span className="font-bold text-gray-800">Weekly Digest</span>
-                <span className="text-yellow-700 text-xs font-bold bg-yellow-100 px-2 py-0.5 rounded-full">Every Sunday</span>
-              </div>
-              <p className="text-xs text-gray-500 mb-4">Sends learning topics and dinner-table discussion prompts to parent email.</p>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-sm text-gray-700 font-bold">Email Delivery</span>
-              <button onClick={() => setEmailToggle(!emailToggle)} className={`w-11 h-6 rounded-full transition-colors relative ${emailToggle ? "bg-blue-600" : "bg-gray-300"}`}>
-                <span className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform ${emailToggle ? "translate-x-5" : "translate-x-0"}`}></span>
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <div className="flex flex-col sm:flex-row items-center justify-between gap-4 pt-6 mt-6 border-t border-gray-100">
-          <div className="flex items-center gap-2 text-gray-500 text-xs">
-            <span className="material-symbols-outlined text-[18px] text-yellow-600">lock</span>
-            <span>Settings apply instantly across Alex's logged-in devices.</span>
-          </div>
-          <button className="bg-blue-600 text-white px-6 py-2 rounded-full font-bold shadow-[0_4px_0_#00419c] active:translate-y-1 transition-all text-sm w-full sm:w-auto">
-            Save Preferences
-          </button>
+        <div className="mt-1 h-4 rounded-full bg-ink-soft overflow-hidden flex" role="img" aria-label={`Compact ${s.split.compactPct} percent, mid-size ${s.split.midPct} percent`}>
+          <div className="bg-marker h-full" style={{ width: `${totalCalls ? s.split.compactPct : 0}%` }} />
+          <div className="bg-ink h-full" style={{ width: `${totalCalls ? s.split.midPct : 0}%` }} />
         </div>
       </div>
 
-    </main>
+      <div className="mt-4 grid grid-cols-2 md:grid-cols-4 gap-3">
+        <Stat label="Questions" value={s.requests} sub={`${totalCalls} model calls`} />
+        <Stat label="Served from cache" value={`${s.cacheHitRate}%`} sub={`${s.cacheHits + s.coalesced} repeats, 0 calls`} />
+        <Stat label="Tokens" value={tokens.toLocaleString()} sub={`${s.localAnswers} answered locally`} />
+        <Stat label="Avg wait" value={`${(s.avgLatencyMs.mid / 1000).toFixed(1)}s`} sub={`mid · compact ${(s.avgLatencyMs.compact / 1000).toFixed(1)}s`} />
+      </div>
+
+      <div className="mt-4 grid md:grid-cols-2 gap-3">
+        <div className="rounded-2xl border-2 border-line p-4">
+          <p className="font-extrabold text-night">Platform refusals: {refusals}</p>
+          <ul className="mt-1 text-sm text-muted space-y-0.5">
+            <li>429 quota: {s.refusals.quota429} · 503 busy: {s.refusals.busy503} · 400 too big: {s.refusals.bad400}</li>
+            <li>Timeouts / network: {s.refusals.timeout + s.refusals.network} · Key refused: {s.refusals.auth ?? 0}</li>
+          </ul>
+        </div>
+        <div className="rounded-2xl border-2 border-line p-4">
+          <p className="font-extrabold text-night">How each was handled</p>
+          <ul className="mt-1 text-sm text-muted space-y-0.5">
+            <li>Waited the stated delay and retried: {s.handling.waitedAndRetried}</li>
+            <li>Switched to compact: {s.handling.fellBackToCompact} · Shrunk and retried: {s.handling.shrankAndRetried}</li>
+            <li>Low-quota routing: {s.handling.lowQuotaRouting} · Asked child to wait: {s.handling.deferredToChild}</li>
+          </ul>
+        </div>
+      </div>
+      <p className="mt-3 text-sm text-muted">
+        Quota left: <strong className="text-night">{s.lastQuota?.remaining ?? "unknown"}{s.lastQuota?.limit ? ` / ${s.lastQuota.limit}` : ""}</strong> · max parallel calls {m.concurrency.compact} compact / {m.concurrency.mid} mid · peak queue {s.peakQueue.compact}/{s.peakQueue.mid} · embeddings {s.embeddings.calls} calls, {s.embeddings.cached} cached
+      </p>
+
+      <button onClick={() => setShowTable((v) => !v)} aria-expanded={showTable} className="mt-4 h-12 px-4 rounded-full border-2 border-line font-bold text-sm">
+        {showTable ? "Hide" : "Show"} the routing table
+      </button>
+      {showTable && (
+        <div className="mt-3 overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-start text-muted">
+                <th className="py-2 pe-3 text-start font-bold">Step</th>
+                <th className="py-2 pe-3 text-start font-bold">Model</th>
+                <th className="py-2 text-start font-bold">Why</th>
+              </tr>
+            </thead>
+            <tbody>
+              {m.routingTable.map((r) => (
+                <tr key={r.task} className="border-t-2 border-line align-top">
+                  <td className="py-2 pe-3 text-night font-semibold">{r.task}</td>
+                  <td className="py-2 pe-3">
+                    <span className={`px-2 py-0.5 rounded-full text-xs font-extrabold ${r.model === "mid" ? "bg-ink text-white" : r.model === "compact" ? "bg-marker" : "bg-leaf-soft"}`}>{r.model}</span>
+                  </td>
+                  <td className="py-2 text-muted">{r.why}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
   );
 }

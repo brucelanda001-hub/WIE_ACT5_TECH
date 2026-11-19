@@ -1,395 +1,308 @@
 "use client";
-import { useState } from "react";
 import Link from "next/link";
+import { useEffect, useState } from "react";
+import { KidShell, useUiLang } from "@/components/KidShell";
+import { useKid } from "@/components/useKid";
+import { COINS_PER_ANSWER, COMPANIONS, GROW_COST, GROW_STAGES, stageFor } from "@/lib/companions";
+import { t, type UiLang } from "@/lib/i18n";
+
+// Companions are earned by learning (5 coins per answered question), never bought, never lost.
+// No streaks, no countdowns, no "you'll lose it" messages (UK Children's Code, nudge techniques).
+
+type Progress = { coins: number; sproutXP: number; answers: number; unlocked: string[] };
+
+const MAX_XP = GROW_STAGES[GROW_STAGES.length - 1].xp;
+const XP_PER_WATER = 50;
+
+/* Per-companion colours for the halo behind each sticker */
+const HALO: Record<string, string> = {
+  owl: "from-[#c7d2fe] to-[#a5b4fc]",
+  turtle: "from-[#fde68a] to-[#fcd34d]",
+  camel: "from-[#fecdd3] to-[#fda4af]",
+  rocket: "from-[#ddd6fe] to-[#c4b5fd]",
+};
+
+const fill = (tpl: string, vars: Record<string, string | number>) => tpl.replace(/\{(\w+)\}/g, (_, k) => String(vars[k] ?? ""));
+
+function Coin({ size = 44 }: { size?: number }) {
+  return (
+    <span
+      aria-hidden
+      className="coin-shine inline-grid place-items-center rounded-full border-2 border-[#b7791f] font-extrabold text-[#7a4f12] shrink-0"
+      style={{ width: size, height: size, fontSize: size * 0.42, background: "radial-gradient(circle at 32% 28%, #fff7cc 0%, #ffd23f 38%, #f5a524 100%)" }}
+    >
+      ★
+    </span>
+  );
+}
+
+/** The wallet: coins and a ring that fills towards the next friend. */
+function Wallet({ lang, coins, next }: { lang: UiLang; coins: number | null; next?: { name: string; emoji: string; cost: number } }) {
+  const pct = next && coins !== null ? Math.min(100, Math.round((coins / next.cost) * 100)) : 100;
+  return (
+    <div className="glass-card rounded-[28px] px-5 py-4 flex items-center gap-4">
+      <div className="relative w-[76px] h-[76px] shrink-0 rounded-full grid place-items-center" style={{ background: `conic-gradient(var(--color-grape) ${pct * 3.6}deg, rgb(124 58 237 / 0.15) 0deg)` }}>
+        <div className="w-[62px] h-[62px] rounded-full bg-white grid place-items-center">
+          <Coin size={44} />
+        </div>
+      </div>
+      <div>
+        <p className="text-4xl font-extrabold text-night tabular-nums leading-none font-[family-name:var(--font-display)]">{coins ?? "…"}</p>
+        <p className="text-sm font-bold text-muted">{t(lang, "d_coins")}</p>
+        {next && (
+          <p className="mt-1 text-xs font-bold text-grape" dir="auto">
+            {t(lang, "c_nextFriend")}: {next.emoji} {next.name} · {pct}%
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Sproutley's little world: sky, sun, grass, the plant, and water drops when watered. */
+function Garden({ emoji, name, watering }: { emoji: string; name: string; watering: boolean }) {
+  return (
+    <div className="relative h-64 rounded-[24px] overflow-hidden" style={{ background: "linear-gradient(180deg, #dbeafe 0%, #e9f8f1 70%)" }}>
+      <span className="garden-sun absolute top-5 end-6 w-14 h-14 rounded-full" style={{ background: "radial-gradient(circle, #fff3b0 0%, #ffd23f 60%, #ffd23f00 72%)" }} aria-hidden />
+      <span className="garden-cloud absolute top-8 start-6 w-20 h-7 rounded-full bg-white/90" aria-hidden />
+      <span className="garden-cloud absolute top-16 start-24 w-12 h-5 rounded-full bg-white/80" style={{ animationDelay: "-6s" }} aria-hidden />
+      {/* ground */}
+      <div className="absolute bottom-0 inset-x-0 h-16 rounded-t-[50%]" style={{ background: "linear-gradient(180deg, #8bd17c 0%, #5fb35a 30%, #b88b5e 31%, #9a6f45 100%)" }} aria-hidden />
+      {[12, 30, 64, 82].map((x) => (
+        <span key={x} className="absolute bottom-[54px] text-xl" style={{ left: `${x}%` }} aria-hidden>🌱</span>
+      ))}
+      {/* water drops */}
+      {watering &&
+        [0, 1, 2, 3, 4].map((i) => (
+          <span key={i} className="water-drop absolute top-0 text-2xl" style={{ left: `${38 + i * 6}%`, animationDelay: `${i * 120}ms` }} aria-hidden>
+            💧
+          </span>
+        ))}
+      {/* the plant */}
+      <div className="absolute inset-x-0 bottom-9 grid place-items-center">
+        <span key={emoji} className="plant-sway tile-pop text-[118px] leading-none" role="img" aria-label={name}>
+          {emoji}
+        </span>
+      </div>
+      {[[18, 40], [76, 30], [60, 62]].map(([x, y], i) => (
+        <span key={i} className="garden-spark absolute text-lg" style={{ left: `${x}%`, top: `${y}%`, animationDelay: `${i * 0.7}s` }} aria-hidden>✨</span>
+      ))}
+    </div>
+  );
+}
 
 export default function Companions() {
-  const [coins, setCoins] = useState(240);
-  const [sproutXP, setSproutXP] = useState(160);
-  const [sproutBloomed, setSproutBloomed] = useState(false);
-  const [barnabyUnlocked, setBarnabyUnlocked] = useState(false);
-  const [toast, setToast] = useState<{ title: string; desc: string } | null>(null);
-  const [filter, setFilter] = useState<"all" | "plant" | "animal">("all");
+  const kid = useKid();
+  const [lang] = useUiLang(kid);
+  const [p, setP] = useState<Progress | null>(null);
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [justGot, setJustGot] = useState<string | null>(null);
+  const [watering, setWatering] = useState(false);
 
-  function showToast(title: string, desc: string) {
-    setToast({ title, desc });
-    setTimeout(() => setToast(null), 3500);
-  }
+  useEffect(() => {
+    fetch("/api/user", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((d) => d.ok && setP(d.progress))
+      .catch(() => setMsg(t(lang, "c_offline")));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  function handleGrowSproutley() {
-    if (coins >= 80) {
-      setCoins(coins - 80);
-      setSproutXP(200);
-      setSproutBloomed(true);
-      showToast("Sproutley is Blooming!", "You spent 80 coins. Stage 3 perks unlocked!");
+  async function act(body: { action: string; companion?: string }, id?: string) {
+    setBusy(true);
+    setMsg("");
+    let d: { ok: boolean; error?: string; progress?: Progress };
+    try {
+      d = await fetch("/api/user", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then((r) => r.json());
+    } catch {
+      setBusy(false);
+      return setMsg(t(lang, "c_offline"));
+    }
+    setBusy(false);
+    if (!d.ok || !d.progress) return setMsg(d.error ?? t(lang, "c_offline"));
+    if (body.action === "grow") {
+      setWatering(true);
+      setTimeout(() => setWatering(false), 1400);
+    }
+    setP(d.progress);
+    if (id) {
+      setJustGot(id);
+      setTimeout(() => setJustGot(null), 1600);
     }
   }
 
-  function handleUnlockBarnaby() {
-    if (coins >= 180) {
-      setCoins(coins - 180);
-      setBarnabyUnlocked(true);
-      showToast("Welcome Barnaby! 🦉", "Barnaby the Curious Owl joined your companions!");
-    } else {
-      showToast("Need More Coins!", "Complete learning quests to earn more coins.");
-    }
-  }
+  const xp = p?.sproutXP ?? 0;
+  const coins = p?.coins ?? null;
+  const stage = stageFor(xp);
+  const nextStage = GROW_STAGES.find((s) => s.xp > xp);
+  const wateringsToNext = nextStage ? Math.ceil((nextStage.xp - xp) / XP_PER_WATER) : 0;
+  const canWater = !!p && !!nextStage && p.coins >= GROW_COST;
+  const friends = COMPANIONS.filter((c) => c.id !== "sprout");
+  const nextFriend = friends.find((c) => !p?.unlocked.includes(c.id));
 
   return (
-    <main className="w-full pt-20 bg-[#f8f9ff] flex-1 max-w-[1280px] mx-auto px-6">
-      
-      {/* HEADER */}
-      <header className="fixed top-0 left-0 right-0 w-full z-50 bg-white/95 backdrop-blur-xl shadow-[0_4px_20px_rgba(39,50,64,0.06)]">
-        <div className="h-20 max-w-[1280px] mx-auto px-6 flex items-center justify-between gap-6">
-          <div className="flex items-center gap-3 flex-shrink-0">
-            <div className="w-8 h-8 bg-blue-600 rounded-full flex items-center justify-center text-white font-bold">E</div>
-            <span className="text-xl text-blue-600 tracking-tight font-extrabold">EdNova</span>
-          </div>
-          <nav className="hidden lg:flex items-center bg-[#eef4ff] p-1 rounded-full gap-1">
-            <Link href="/dashboard" className="px-4 py-2 rounded-full text-sm font-bold text-gray-600 hover:bg-white transition-all">Dashboard</Link>
-            <Link href="/" className="px-4 py-2 rounded-full text-sm font-bold text-gray-600 hover:bg-white transition-all">Ask EdNova</Link>
-            <Link href="/companions" className="px-4 py-2 rounded-full text-sm font-bold text-gray-600 hover:bg-white transition-all">My Companions</Link>
-            <Link href="/explore" className="px-4 py-2 rounded-full text-sm font-bold text-gray-600 hover:bg-white transition-all">Explore Subjects</Link>
-            <a className="px-4 py-2 rounded-full text-sm font-bold text-gray-600 hover:bg-white transition-all" href="#">Explore Subjects</a>
-          </nav>
-          <div className="flex items-center gap-3 flex-shrink-0">
-            <div className="flex items-center gap-1 bg-[#ffd9e3] text-[#3e001e] px-3 py-1 rounded-full shadow-[0_2px_0_rgba(142,0,76,0.18)]">
-              <span className="material-symbols-outlined text-[#af2464] text-[20px]">local_fire_department</span>
-              <span className="text-xs font-bold">5 Day Streak</span>
-            </div>
-            <div className="flex items-center gap-1 bg-[#ffe087] text-[#231a00] px-3 py-1 rounded-full shadow-[0_2px_0_rgba(87,69,0,0.18)]">
-              <span className="material-symbols-outlined text-[#735c00] text-[20px]">monetization_on</span>
-              <span className="text-xs font-bold">{coins} Coins</span>
-            </div>
-            <div className="flex items-center gap-2 bg-white pl-1 pr-3 py-1 rounded-full shadow-[0_2px_8px_rgba(0,0,0,0.06)]">
-              <div className="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center text-white text-sm font-bold">A</div>
-              <span className="text-sm font-bold text-gray-800">Alex</span>
-            </div>
-          </div>
-        </div>
-      </header>
-
-      {/* HERO SECTION */}
-      <section className="w-full pt-8 pb-4">
-        <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
-          <div className="max-w-2xl">
-            <div className="inline-flex items-center gap-2 px-3 py-1 bg-[#e5eeff] rounded-full text-blue-600 text-xs font-bold shadow-sm mb-2">
-              <span className="material-symbols-outlined text-[16px]">potted_plant</span>
-              <span>Tactile Sanctuary & Companions</span>
-            </div>
-            <h1 className="text-4xl font-extrabold text-gray-800 tracking-tight">Your Learning Companions & Garden 🌿🐾</h1>
-            <p className="text-lg text-gray-500 mt-2">Earn coins by asking questions and doing daily quests. Choose how to nurture your friends!</p>
-          </div>
-          
-          <div className="flex flex-wrap items-center gap-3">
-            <div className="flex items-center gap-3 bg-white px-4 py-2 rounded-full shadow-sm">
-              <div className="w-10 h-10 rounded-full bg-[#ffe087] flex items-center justify-center">
-                <span className="material-symbols-outlined text-[24px]">monetization_on</span>
-              </div>
-              <div>
-                <span className="block text-xs font-bold text-gray-500">Coin Balance</span>
-                <span className="text-lg font-extrabold text-gray-800 leading-none">{coins} Coins</span>
-              </div>
-            </div>
-            <div className="flex items-center gap-3 bg-white px-4 py-2 rounded-full shadow-sm">
-              <div className="w-10 h-10 rounded-full bg-[#ffd9e3] flex items-center justify-center">
-                <span className="material-symbols-outlined text-[24px]">local_fire_department</span>
-              </div>
-              <div>
-                <span className="block text-xs font-bold text-gray-500">Daily Streak</span>
-                <span className="text-lg font-extrabold text-pink-600 leading-none">5 Days Active</span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* TABS */}
-        <div className="mt-8 flex items-center gap-2 overflow-x-auto pb-2">
-          <button onClick={() => setFilter("all")} className={`px-4 py-2 rounded-full text-sm font-bold transition-all flex items-center gap-2 ${filter === "all" ? "bg-blue-600 text-white shadow-[0_3px_0_#00419c]" : "bg-white text-gray-600 shadow-sm"}`}>
-            <span className="material-symbols-outlined text-[18px]">apps</span> All Companions
-          </button>
-          <button onClick={() => setFilter("plant")} className={`px-4 py-2 rounded-full text-sm font-bold transition-all flex items-center gap-2 ${filter === "plant" ? "bg-blue-600 text-white shadow-[0_3px_0_#00419c]" : "bg-white text-gray-600 shadow-sm"}`}>
-            <span className="material-symbols-outlined text-[18px]">yard</span> Plant Friends (3)
-          </button>
-          <button onClick={() => setFilter("animal")} className={`px-4 py-2 rounded-full text-sm font-bold transition-all flex items-center gap-2 ${filter === "animal" ? "bg-blue-600 text-white shadow-[0_3px_0_#00419c]" : "bg-white text-gray-600 shadow-sm"}`}>
-            <span className="material-symbols-outlined text-[18px]">pets</span> Animal Companions (4)
-          </button>
-        </div>
-      </section>
-
-      {/* ACTIVE COMPANION SPOTLIGHT */}
-      <section className="w-full mt-4 relative bg-white rounded-2xl p-6 md:p-8 shadow-sm overflow-hidden">
-        <div className="absolute -right-16 -top-16 w-80 h-80 rounded-full bg-yellow-100/50 blur-2xl pointer-events-none"></div>
-        
-        <div className="relative z-10 flex flex-wrap items-center justify-between gap-4 pb-4">
-          <div className="flex items-center gap-2">
-            <span className="px-3 py-1 rounded-full bg-[#ffe087] text-[#231a00] text-xs font-bold shadow-sm flex items-center gap-1">
-              <span className="material-symbols-outlined text-[16px]">stars</span> Currently Caring For
-            </span>
-            <span className="px-3 py-1 rounded-full bg-[#e5eeff] text-blue-600 text-xs font-bold">Plant Category</span>
-          </div>
-          <div className="flex items-center gap-2 bg-gray-50 px-3 py-1 rounded-full text-xs text-gray-500">
-            <span className="material-symbols-outlined text-blue-600 text-[18px]">info</span>
-            <span>Growth governed by Coins, not Streaks!</span>
-          </div>
-        </div>
-
-        <div className="relative z-10 grid grid-cols-1 lg:grid-cols-12 gap-8 items-center">
-          <div className="lg:col-span-5 flex flex-col items-center">
-            <div className="relative w-full max-w-sm aspect-square bg-gray-50 rounded-2xl p-6 flex flex-col items-center justify-center shadow-inner">
-              <div className="absolute top-4 left-6 right-6 bg-white p-3 rounded-xl shadow-md flex items-center gap-2">
-                <span className="material-symbols-outlined text-yellow-500 text-[20px] shrink-0">wb_sunny</span>
-                <p className="text-sm text-gray-700">"Water me with sunshine coins to help me bloom into Stage 3!"</p>
-              </div>
-              
-              <div className="w-48 h-48 flex items-center justify-center mt-8">
-                <svg className="w-full h-full drop-shadow-md" fill="none" viewBox="0 0 160 160">
-                  <path d="M45 100 L115 100 L108 145 C108 150 102 154 96 154 L64 154 C58 154 52 150 52 145 Z" fill="#E28B59"></path>
-                  <rect fill="#F4A261" height="12" rx="6" width="80" x="40" y="94"></rect>
-                  <ellipse cx="80" cy="100" fill="#5F3A1D" rx="35" ry="5"></ellipse>
-                  <path d="M80 100 Q78 75 80 55" stroke="#489D5B" strokeLinecap="round" strokeWidth="8"></path>
-                  <path d="M80 82 C65 82 50 76 46 64 C60 62 76 72 80 82 Z" fill="#59C978"></path>
-                  <path d="M80 72 C95 72 110 66 114 54 C100 52 84 62 80 72 Z" fill="#59C978"></path>
-                  <g transform="translate(80, 50)">
-                    <ellipse cx="0" cy="-22" fill="#FFD447" rx="6" ry="12"></ellipse>
-                    <ellipse cx="16" cy="-16" fill="#FFD447" rx="6" ry="12" transform="rotate(45 16 -16)"></ellipse>
-                    <ellipse cx="22" cy="0" fill="#FFD447" rx="6" ry="12" transform="rotate(90 22 0)"></ellipse>
-                    <ellipse cx="16" cy="16" fill="#FFD447" rx="6" ry="12" transform="rotate(135 16 16)"></ellipse>
-                    <ellipse cx="0" cy="22" fill="#FFD447" rx="6" ry="12" transform="rotate(180 0 22)"></ellipse>
-                    <ellipse cx="-16" cy="16" fill="#FFD447" rx="6" ry="12" transform="rotate(225 -16 16)"></ellipse>
-                    <ellipse cx="-22" cy="0" fill="#FFD447" rx="6" ry="12" transform="rotate(270 -22 0)"></ellipse>
-                    <ellipse cx="-16" cy="-16" fill="#FFD447" rx="6" ry="12" transform="rotate(315 -16 -16)"></ellipse>
-                    <circle cx="0" cy="0" fill="#735C00" r="16"></circle>
-                    <circle cx="0" cy="0" fill="#8B6F00" r="14"></circle>
-                    <circle cx="-5" cy="-2" fill="#FFF" r="2.5"></circle>
-                    <circle cx="5" cy="-2" fill="#FFF" r="2.5"></circle>
-                    <path d="M-3 4 Q0 7 3 4" fill="none" stroke="#FFF" strokeLinecap="round" strokeWidth="1.5"></path>
-                  </g>
-                </svg>
-              </div>
-              
-              <div className="mt-4 flex items-center gap-2 bg-white/80 backdrop-blur-sm px-4 py-1 rounded-full shadow-sm">
-                <span className="w-2.5 h-2.5 rounded-full bg-yellow-400 animate-pulse"></span>
-                <span className="text-xs font-bold text-gray-800">Status: Thriving & Hydrated</span>
-              </div>
-            </div>
-          </div>
-
-          <div className="lg:col-span-7 flex flex-col justify-between h-full">
+    <KidShell active="companions" lang={lang} kid={kid}>
+      <main className="cahier cahier-margin flex-1" style={{ "--col": "64rem" } as React.CSSProperties}>
+        <div className="mx-auto max-w-5xl ps-10 pe-4 sm:ps-20 py-8">
+          {/* Header */}
+          <div className="flex flex-wrap items-center gap-5 justify-between">
             <div>
-              <div className="flex items-baseline gap-3 flex-wrap">
-                <h2 className="text-3xl font-extrabold text-gray-800">Sproutley the Sunflower</h2>
-                <span className="text-sm font-bold text-blue-600 bg-blue-100 px-3 py-1 rounded-full">Stage {sproutBloomed ? 3 : 2} of 4</span>
-              </div>
-              <p className="text-gray-600 mt-2">Sproutley loves curious minds. Every time you ask deep science or nature questions, Sproutley soaks in the excitement.</p>
-              
-              <div className="mt-6 bg-gray-50 p-4 rounded-xl shadow-sm">
-                <div className="flex items-center justify-between mb-2">
-                  <div className="flex items-center gap-2">
-                    <span className="material-symbols-outlined text-yellow-600 text-[20px]">energy_savings_leaf</span>
-                    <span className="text-sm font-bold text-gray-800">Evolution Growth Bar</span>
-                  </div>
-                  <span className="text-sm font-extrabold text-gray-800">{sproutXP} / 200 XP</span>
-                </div>
-                <div className="w-full h-4 bg-gray-200 rounded-full overflow-hidden p-0.5 shadow-inner">
-                  <div className="h-full bg-gradient-to-r from-yellow-500 to-yellow-300 rounded-full transition-all duration-700" style={{ width: `${(sproutXP / 200) * 100}%` }}></div>
-                </div>
-                <div className="mt-2 flex items-center justify-between text-gray-500 text-xs">
-                  <span>Current: Small Sprout</span>
-                  <span className="text-yellow-600 font-bold">Next: Radiant Blossom (Stage 3)</span>
-                </div>
-              </div>
-
-              <div className="mt-4 flex items-start gap-3 bg-[#e5eeff] p-3 rounded-xl">
-                <div className="w-8 h-8 rounded-full bg-blue-600 text-white flex items-center justify-center shrink-0">
-                  <span className="material-symbols-outlined text-[18px]">celebration</span>
-                </div>
-                <div>
-                  <span className="text-xs font-bold text-gray-800 block">Stage 3 Milestone Perk:</span>
-                  <span className="text-sm text-gray-600">Unlocks joyful celebration shower animations whenever you ask creative questions to EdNova!</span>
-                </div>
-              </div>
-            </div>
-
-            <div className="mt-6 pt-4 flex flex-col sm:flex-row items-center gap-4">
-              <button 
-                onClick={handleGrowSproutley}
-                disabled={sproutBloomed}
-                className={`w-full sm:w-auto px-6 py-3 rounded-full text-lg font-bold transition-all flex items-center justify-center gap-2 ${sproutBloomed ? "bg-gray-200 text-gray-500" : "bg-blue-600 text-white shadow-[0_4px_0_#00419c] active:translate-y-1"}`}
-              >
-                <span className="material-symbols-outlined text-[22px]">{sproutBloomed ? "auto_awesome" : "water_drop"}</span>
-                <span>{sproutBloomed ? "Sproutley Bloomed!" : "Grow Sproutley Now (80 Coins)"}</span>
-              </button>
-              <span className="text-sm text-gray-500 text-center sm:text-left">
-                You have <strong className="text-gray-800">{coins} coins</strong>. Plenty to evolve Sproutley!
-              </span>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* COMPANIONS GRID */}
-      <section className="w-full mt-10 mb-10">
-        <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 mb-6">
-          <div>
-            <div className="flex items-center gap-2 text-pink-600 text-xs font-bold">
-              <span className="material-symbols-outlined text-[18px]">savings</span>
-              <span>Strategy Decision</span>
-            </div>
-            <h2 className="text-3xl font-extrabold text-gray-800 tracking-tight mt-1">Save for a New Friend</h2>
-            <p className="text-gray-500 mt-1">Do you want to spend coins on Sproutley or save up to unlock another companion to learn with?</p>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-          
-          {/* Barnaby */}
-          {(filter === "all" || filter === "animal") && (
-            <div className="bg-white rounded-2xl p-4 shadow-sm flex flex-col justify-between transition-all hover:-translate-y-1">
-              <div>
-                <div className="flex items-center justify-between">
-                  <span className="bg-pink-100 text-pink-700 text-xs font-bold px-3 py-1 rounded-full flex items-center gap-1">
-                    <span className="material-symbols-outlined text-[14px]">cruelty_free</span> Animal
+              <h1 className="text-4xl sm:text-5xl font-extrabold leading-tight bg-gradient-to-r from-ink to-grape bg-clip-text text-transparent">
+                {t(lang, "c_title")} ✨
+              </h1>
+              <div className="mt-3 flex flex-wrap gap-2" dir="auto">
+                {[
+                  `💬 ${fill(t(lang, "c_rule_q"), { n: COINS_PER_ANSWER })}`,
+                  `💧 ${fill(t(lang, "c_rule_w"), { n: GROW_COST })}`,
+                  `🔒 ${t(lang, "c_rule_safe")}`,
+                ].map((chip) => (
+                  <span key={chip} className="h-9 px-3 rounded-full bg-white/80 border border-grape-soft text-sm font-bold text-night inline-flex items-center">
+                    {chip}
                   </span>
-                  <div className="flex items-center gap-1 text-yellow-700 text-xs font-bold bg-yellow-100 px-2 py-1 rounded-full">
-                    <span className="material-symbols-outlined text-[14px]">monetization_on</span> 180 Coins
-                  </div>
-                </div>
-                <div className="w-full aspect-[4/3] bg-gray-50 rounded-xl mt-4 overflow-hidden flex items-center justify-center p-4">
-                  <div className="w-24 h-24 text-6xl flex items-center justify-center">🦉</div>
-                </div>
-                <h3 className="text-xl font-bold text-gray-800 mt-4">Barnaby</h3>
-                <p className="text-xs font-bold text-pink-600">The Curious Owl</p>
-                <p className="text-sm text-gray-500 mt-2">Loves history & nocturnal mysteries. Asks thoughtful timeline questions!</p>
-              </div>
-              <div className="mt-4 pt-4">
-                <button 
-                  onClick={handleUnlockBarnaby}
-                  disabled={barnabyUnlocked}
-                  className={`w-full py-2 rounded-full text-sm font-bold transition-all flex items-center justify-center gap-2 ${barnabyUnlocked ? "bg-gray-200 text-gray-500" : "bg-pink-600 text-white shadow-[0_4px_0_#8e004c] active:translate-y-1"}`}
-                >
-                  <span className="material-symbols-outlined text-[18px]">{barnabyUnlocked ? "favorite" : "lock_open"}</span>
-                  <span>{barnabyUnlocked ? "Unlocked & In Garden" : "Unlock Now (180 Coins)"}</span>
-                </button>
+                ))}
               </div>
             </div>
-          )}
-
-          {/* Fern */}
-          {(filter === "all" || filter === "plant") && (
-            <div className="bg-white rounded-2xl p-4 shadow-sm flex flex-col justify-between transition-all hover:-translate-y-1">
-              <div>
-                <div className="flex items-center justify-between">
-                  <span className="bg-blue-100 text-blue-700 text-xs font-bold px-3 py-1 rounded-full flex items-center gap-1">
-                    <span className="material-symbols-outlined text-[14px]">potted_plant</span> Plant
-                  </span>
-                  <div className="flex items-center gap-1 text-gray-500 text-xs font-bold bg-gray-100 px-2 py-1 rounded-full">
-                    <span className="material-symbols-outlined text-[14px]">monetization_on</span> 300 Coins
-                  </div>
-                </div>
-                <div className="w-full aspect-[4/3] bg-gray-50 rounded-xl mt-4 overflow-hidden flex items-center justify-center p-4">
-                  <div className="w-24 h-24 text-6xl flex items-center justify-center">🌿</div>
-                </div>
-                <h3 className="text-xl font-bold text-gray-800 mt-4">Fern</h3>
-                <p className="text-xs font-bold text-blue-600">The Dino Fern</p>
-                <p className="text-sm text-gray-500 mt-2">Prehistoric botanical explorer fascinated by geology, fossils, and dinosaurs.</p>
-              </div>
-              <div className="mt-4 pt-4">
-                <div className="w-full bg-gray-100 rounded-full h-3 mb-2 p-0.5">
-                  <div className="bg-blue-600 h-full rounded-full" style={{ width: "80%" }}></div>
-                </div>
-                <div className="flex items-center justify-between text-xs text-gray-500 mb-2">
-                  <span>240 / 300 Coins</span>
-                  <span className="text-blue-600 font-bold">60 more</span>
-                </div>
-                <button className="w-full py-2 rounded-full text-sm font-bold bg-gray-100 text-gray-400 cursor-not-allowed flex items-center justify-center gap-2" disabled>
-                  <span className="material-symbols-outlined text-[18px]">savings</span> Saving Coins
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* Pip */}
-          {(filter === "all" || filter === "animal") && (
-            <div className="bg-white rounded-2xl p-4 shadow-sm flex flex-col justify-between transition-all hover:-translate-y-1">
-              <div>
-                <div className="flex items-center justify-between">
-                  <span className="bg-pink-100 text-pink-700 text-xs font-bold px-3 py-1 rounded-full flex items-center gap-1">
-                    <span className="material-symbols-outlined text-[14px]">cruelty_free</span> Animal
-                  </span>
-                  <div className="flex items-center gap-1 text-gray-500 text-xs font-bold bg-gray-100 px-2 py-1 rounded-full">
-                    <span className="material-symbols-outlined text-[14px]">monetization_on</span> 350 Coins
-                  </div>
-                </div>
-                <div className="w-full aspect-[4/3] bg-gray-50 rounded-xl mt-4 overflow-hidden flex items-center justify-center p-4">
-                  <div className="w-24 h-24 text-6xl flex items-center justify-center">🦊</div>
-                </div>
-                <h3 className="text-xl font-bold text-gray-800 mt-4">Pip</h3>
-                <p className="text-xs font-bold text-pink-600">The Explorer Fox</p>
-                <p className="text-sm text-gray-500 mt-2">Quick with math riddles and logic puzzles. Boosts quiz streak bonuses!</p>
-              </div>
-              <div className="mt-4 pt-4">
-                <div className="w-full bg-gray-100 rounded-full h-3 mb-2 p-0.5">
-                  <div className="bg-pink-500 h-full rounded-full" style={{ width: "68%" }}></div>
-                </div>
-                <div className="flex items-center justify-between text-xs text-gray-500 mb-2">
-                  <span>240 / 350 Coins</span>
-                  <span className="text-pink-600 font-bold">110 more</span>
-                </div>
-                <button className="w-full py-2 rounded-full text-sm font-bold bg-gray-100 text-gray-400 cursor-not-allowed flex items-center justify-center gap-2" disabled>
-                  <span className="material-symbols-outlined text-[18px]">lock</span> Locked
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* Luna */}
-          {(filter === "all" || filter === "plant") && (
-            <div className="bg-white rounded-2xl p-4 shadow-sm flex flex-col justify-between transition-all hover:-translate-y-1">
-              <div>
-                <div className="flex items-center justify-between">
-                  <span className="bg-blue-100 text-blue-700 text-xs font-bold px-3 py-1 rounded-full flex items-center gap-1">
-                    <span className="material-symbols-outlined text-[14px]">potted_plant</span> Plant
-                  </span>
-                  <div className="flex items-center gap-1 text-gray-500 text-xs font-bold bg-gray-100 px-2 py-1 rounded-full">
-                    <span className="material-symbols-outlined text-[14px]">monetization_on</span> 500 Coins
-                  </div>
-                </div>
-                <div className="w-full aspect-[4/3] bg-gray-50 rounded-xl mt-4 overflow-hidden flex items-center justify-center p-4">
-                  <div className="w-24 h-24 text-6xl flex items-center justify-center">🌵</div>
-                </div>
-                <h3 className="text-xl font-bold text-gray-800 mt-4">Luna</h3>
-                <p className="text-xs font-bold text-blue-600">The Moon Cactus</p>
-                <p className="text-sm text-gray-500 mt-2">Blooms under starry night skies. Unlocks evening calm reading rewards.</p>
-              </div>
-              <div className="mt-4 pt-4">
-                <div className="w-full bg-gray-100 rounded-full h-3 mb-2 p-0.5">
-                  <div className="bg-blue-500 h-full rounded-full" style={{ width: "48%" }}></div>
-                </div>
-                <div className="flex items-center justify-between text-xs text-gray-500 mb-2">
-                  <span>240 / 500 Coins</span>
-                  <span className="text-gray-600 font-bold">260 more</span>
-                </div>
-                <button className="w-full py-2 rounded-full text-sm font-bold bg-gray-100 text-gray-400 cursor-not-allowed flex items-center justify-center gap-2" disabled>
-                  <span className="material-symbols-outlined text-[18px]">lock</span> Locked
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-      </section>
-
-      {/* TOAST NOTIFICATION */}
-      {toast && (
-        <div className="fixed bottom-6 right-6 max-w-sm bg-white p-4 rounded-xl shadow-2xl flex items-center gap-3 z-50 animate-in slide-in-from-bottom-5">
-          <div className="w-10 h-10 rounded-full bg-blue-600 text-white flex items-center justify-center shrink-0">
-            <span className="material-symbols-outlined text-[22px]">check</span>
+            <Wallet lang={lang} coins={coins} next={nextFriend} />
           </div>
-          <div>
-            <span className="font-bold text-gray-800 block">{toast.title}</span>
-            <span className="text-sm text-gray-500">{toast.desc}</span>
-          </div>
+
+          {/* Sproutley's garden */}
+          <section className="mt-8 glass-card rounded-[32px] p-5 sm:p-6 grid md:grid-cols-[320px_1fr] gap-6 items-center">
+            <Garden emoji={stage.emoji} name={stage.name} watering={watering} />
+            <div>
+              <span className="inline-flex h-8 px-3 rounded-full bg-leaf-soft text-leaf text-sm font-extrabold items-center">🌱 {t(lang, "c_garden")}</span>
+              <h2 className="mt-2 text-3xl font-extrabold text-night">
+                Sproutley <span className="text-muted font-bold">· {stage.name}</span>
+              </h2>
+
+              {/* Growth path: nodes on a track that fills up */}
+              <div className="mt-6 relative" aria-label="Growth stages">
+                <div className="absolute top-7 inset-x-7 h-2 rounded-full bg-grape-soft" aria-hidden />
+                <div className="absolute top-7 start-7 h-2 rounded-full bg-gradient-to-r from-leaf to-[#34d399] transition-all duration-700" style={{ width: `calc((100% - 3.5rem) * ${xp / MAX_XP})` }} aria-hidden />
+                <ol className="relative flex justify-between">
+                  {GROW_STAGES.map((s) => {
+                    const reached = xp >= s.xp;
+                    const current = s.xp === stage.xp;
+                    return (
+                      <li key={s.xp} className="flex flex-col items-center gap-1.5 w-16">
+                        <span
+                          className={`w-14 h-14 rounded-full grid place-items-center text-2xl border-[3px] transition-all ${
+                            current ? "bg-white border-leaf shadow-[0_0_0_6px_rgb(18_165_122_/_0.18)] scale-110" : reached ? "bg-leaf-soft border-leaf" : "bg-white border-grape-soft grayscale-[60%]"
+                          }`}
+                        >
+                          {s.emoji}
+                        </span>
+                        <span className={`text-[11px] font-bold text-center leading-tight ${current ? "text-leaf" : "text-muted"}`}>{s.name}</span>
+                      </li>
+                    );
+                  })}
+                </ol>
+              </div>
+
+              <div className="mt-6">
+                {nextStage ? (
+                  <p className="text-sm font-bold text-night" dir="auto">
+                    {t(lang, "c_next")}: {nextStage.emoji} {nextStage.name} · {wateringsToNext} {t(lang, "c_waterings")}
+                  </p>
+                ) : (
+                  <p className="text-sm font-bold text-leaf">🌳 {t(lang, "c_grown")}</p>
+                )}
+                {nextStage && (
+                  <div className="mt-3 flex flex-wrap items-center gap-4">
+                    <button
+                      onClick={() => act({ action: "grow" })}
+                      disabled={busy || !canWater}
+                      className="water-btn h-14 px-6 rounded-2xl text-white text-lg font-extrabold inline-flex items-center gap-2 disabled:cursor-not-allowed"
+                    >
+                      💧 {t(lang, "c_grow")} · {GROW_COST} <Coin size={22} />
+                    </button>
+                    {p && !canWater && (
+                      <div className="min-w-[200px] flex-1">
+                        <div className="h-3 rounded-full bg-grape-soft overflow-hidden">
+                          <div className="h-full rounded-full bg-gradient-to-r from-[#ffd23f] to-[#f5a524]" style={{ width: `${Math.min(100, (p.coins / GROW_COST) * 100)}%` }} />
+                        </div>
+                        <p className="mt-1 text-xs font-bold text-muted" dir="auto">
+                          {p.coins}/{GROW_COST} 🪙 · {fill(t(lang, "c_questionsLeft"), { n: Math.ceil((GROW_COST - p.coins) / COINS_PER_ANSWER) })}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                )}
+                {p && <p className="mt-3 text-xs font-bold text-muted">✅ {p.answers} {t(lang, "d_answers")}</p>}
+                {msg && <p role="alert" className="mt-3 font-bold text-margin">{msg}</p>}
+              </div>
+            </div>
+          </section>
+
+          {/* Friends to wake up */}
+          <h2 className="mt-10 text-2xl font-extrabold text-night" dir="auto">🎴 {t(lang, "c_friends")}</h2>
+          <ul className="mt-4 grid grid-cols-2 lg:grid-cols-4 gap-5">
+            {friends.map((c) => {
+              const owned = p?.unlocked.includes(c.id);
+              const have = p?.coins ?? 0;
+              const missing = Math.max(0, c.cost - have);
+              const ready = !owned && !!p && missing === 0;
+              const pct = Math.min(100, Math.round((have / c.cost) * 100));
+              return (
+                <li key={c.id}>
+                  <div
+                    className={`friend-card relative h-full rounded-[26px] bg-white/85 backdrop-blur border-2 p-4 pt-5 flex flex-col items-center text-center ${
+                      owned ? "border-leaf" : ready ? "border-grape friend-ready" : "border-white"
+                    }`}
+                  >
+                    {owned && (
+                      <span className="absolute -top-3 start-1/2 -translate-x-1/2 h-7 px-3 rounded-full bg-leaf text-white text-xs font-extrabold grid place-items-center whitespace-nowrap shadow">
+                        ✓ {t(lang, "c_myFriend")}
+                      </span>
+                    )}
+                    <div className={`relative w-24 h-24 rounded-full bg-gradient-to-br ${HALO[c.id] ?? "from-grape-soft to-ink-soft"} grid place-items-center`}>
+                      <span
+                        className={`text-6xl ${owned ? "friend-bob" : "grayscale-[85%] opacity-55"} ${justGot === c.id ? "tile-pop" : ""}`}
+                        aria-hidden
+                      >
+                        {c.emoji}
+                      </span>
+                      {!owned && (
+                        <span className="absolute -bottom-1 -end-1 w-9 h-9 rounded-full bg-white border-2 border-grape-soft grid place-items-center text-lg shadow-sm" aria-hidden>
+                          {ready ? "✨" : "🔒"}
+                        </span>
+                      )}
+                    </div>
+                    <p className="mt-3 text-xl font-extrabold text-night">{c.name}</p>
+                    <p className="text-xs text-muted mt-1 min-h-8" dir="auto">
+                      {t(lang, "c_loves")}: {c.loves}
+                    </p>
+                    <div className="mt-auto pt-4 w-full">
+                      {owned ? (
+                        <p className="h-12 grid place-items-center font-extrabold text-leaf">🤝 {t(lang, "c_owned")}</p>
+                      ) : ready ? (
+                        <button
+                          onClick={() => act({ action: "unlock", companion: c.id }, c.id)}
+                          disabled={busy}
+                          className="w-full h-12 rounded-2xl bg-magic font-extrabold shadow-[0_6px_16px_-6px_rgb(124_58_237_/_0.7)]"
+                        >
+                          ✨ {t(lang, "c_unlock")} · {c.cost}
+                        </button>
+                      ) : (
+                        <Link href="/" className="block rounded-2xl bg-paper/80 px-3 py-2.5 hover:bg-grape-soft transition-colors">
+                          <div className="h-2.5 rounded-full bg-grape-soft overflow-hidden">
+                            <div className="h-full rounded-full bg-gradient-to-r from-ink to-grape" style={{ width: `${pct}%` }} />
+                          </div>
+                          <p className="mt-1.5 text-xs font-extrabold text-night" dir="auto">
+                            🪙 {missing} {t(lang, "c_need")}
+                          </p>
+                          <p className="text-[11px] font-bold text-muted" dir="auto">
+                            ≈ {fill(t(lang, "c_questionsLeft"), { n: Math.ceil(missing / COINS_PER_ANSWER) })}
+                          </p>
+                        </Link>
+                      )}
+                    </div>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
         </div>
-      )}
-    </main>
+      </main>
+    </KidShell>
   );
 }
