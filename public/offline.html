@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#2340c8">
+<title>EdNova: no internet</title>
+<style>
+  *{box-sizing:border-box}
+  html,body{margin:0;min-height:100dvh}
+  body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans Arabic",sans-serif;color:#13204a;
+    background:radial-gradient(120% 80% at 50% 0%,#7c3aed 0%,#2340c8 60%,#1a2f99 100%);
+    display:grid;place-items:center;padding:24px calc(24px + env(safe-area-inset-right)) calc(24px + env(safe-area-inset-bottom)) calc(24px + env(safe-area-inset-left))}
+  main{width:100%;max-width:420px;background:#fff;border-radius:28px;padding:28px 22px;text-align:center;box-shadow:0 20px 50px -12px rgba(0,0,0,.45)}
+  img{width:112px;height:112px;border-radius:28px;animation:bob 3.2s ease-in-out infinite}
+  h1{font-size:26px;margin:14px 0 6px;line-height:1.2}
+  p{margin:0 0 14px;color:#55608a;font-size:18px;line-height:1.45}
+  button{font:inherit;font-weight:800;font-size:18px;min-height:56px;padding:0 26px;border:0;border-radius:999px;color:#fff;
+    background:linear-gradient(135deg,#7c3aed,#2340c8);cursor:pointer;touch-action:manipulation}
+  button.ghost{background:#ede4ff;color:#5b21b6;margin-top:10px}
+  .breath{margin:18px auto 4px;width:120px;height:120px;border-radius:50%;background:radial-gradient(circle,#fff6c8,#ffd23f);
+    display:none;place-items:center;font-weight:800;transition:transform 4s ease-in-out}
+  .breath.on{display:grid}
+  .breath.in{transform:scale(1.25)}
+  @keyframes bob{50%{transform:translateY(-8px)}}
+  @media (prefers-reduced-motion:reduce){img{animation:none}.breath{transition:none}}
+</style>
+</head>
+<body>
+<main>
+  <img src="/icons/icon-192.png" alt="" width="112" height="112">
+  <h1 id="t">No internet right now</h1>
+  <p id="p">Nouri needs the internet to think. Your stickers are safe. Let's try again!</p>
+  <button id="retry">Try again</button>
+  <button id="b" class="ghost">Take a calm breath</button>
+  <div id="breath" class="breath" aria-live="polite"></div>
+</main>
+<script>
+(function () {
+  var L = {
+    en: ["No internet right now", "Nouri needs the internet to think. Your stickers are safe. Let's try again!", "Try again", "Take a calm breath", "Breathe in", "Breathe out"],
+    fr: ["Pas d'internet pour le moment", "Nouri a besoin d'internet pour réfléchir. Tes autocollants sont en sécurité. On réessaie !", "Réessayer", "Respirer calmement", "Inspire", "Expire"],
+    ar: ["لا يوجد إنترنت الآن", "نوري يحتاج إلى الإنترنت ليفكر. ملصقاتك بأمان. لنحاول مرة أخرى!", "حاول مرة أخرى", "تنفّس بهدوء", "شهيق", "زفير"]
+  };
+  var saved = "en";
+  try { saved = localStorage.getItem("ednova_lang") || "en"; } catch (e) {}
+  var key = saved === "darija" ? "ar" : saved;
+  var s = L[key] || L.en;
+  if (key === "ar") document.documentElement.dir = "rtl";
+  document.documentElement.lang = key === "ar" ? "ar" : key;
+  document.getElementById("t").textContent = s[0];
+  document.getElementById("p").textContent = s[1];
+  document.getElementById("retry").textContent = s[2];
+  document.getElementById("b").textContent = s[3];
+  document.getElementById("retry").onclick = function () { location.href = "/"; };
+  window.addEventListener("online", function () { location.href = "/"; });
+  // A tiny offline activity that needs no network: slow breathing (wellbeing, no scores, no streaks).
+  var el = document.getElementById("breath"), timer = null, inhale = false;
+  document.getElementById("b").onclick = function () {
+    if (timer) { clearInterval(timer); timer = null; el.className = "breath"; return; }
+    el.className = "breath on";
+    function tick() { inhale = !inhale; el.textContent = inhale ? s[4] : s[5]; el.className = "breath on" + (inhale ? " in" : ""); }
+    tick(); timer = setInterval(tick, 4000);
+  };
+})();
+</script>
+</body>
+</html>

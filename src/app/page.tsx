@@ -1,313 +1,623 @@
 "use client";
-import { useState, useEffect, Suspense } from "react";
-import Link from "next/link";
+import { offlineMessage } from "@/components/PwaLayer";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
+import { KidShell, useUiLang } from "@/components/KidShell";
+import { NovaFace } from "@/components/Brand";
+import { useKid } from "@/components/useKid";
+import { MathVisual } from "@/components/MathVisual";
+import { StudyBuddy, verdictOf, type BuddyState } from "@/components/StudyBuddy";
+import { topicOf } from "@/components/NovaBuddy";
+import { parseCalculation } from "@/lib/ai/mathcheck";
+// Playful layer: Nouri hero, sticker questions, puzzle of the day, confetti.
+import { Confetti, DailyPuzzle, NovaHero, StickerStarters, soundsRight } from "@/components/Fun";
+import { isRtl, LANG_LABEL, t, type UiLang } from "@/lib/i18n";
 
 type Mode = "explain" | "hint" | "example" | "quiz" | "check" | "summary";
+type Stage = { key: string; at: number; data?: Record<string, string | number> };
+type Result = {
+  answer: string;
+  lang: string;
+  modelClass: "compact" | "mid" | "local" | "cache";
+  route: string;
+  notices: string[];
+  confused: boolean;
+  sources: string[];
+  calls: number;
+  retryAfterSec?: number;
+  ms: number;
+};
+type Msg = {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  question?: string;
+  result?: Result;
+  error?: boolean;
+  retry?: { text: string; mode: Mode };
+  /** The same answer in other languages, kept so switching back is instant (no new AI call). */
+  alts?: Partial<Record<UiLang, string>>;
+  translating?: boolean;
+  translateNote?: string;
+};
 
-const MODES = [
-  { v: "explain", label: "Explain", emoji: "💡" },
-  { v: "hint", label: "Hint", emoji: "🤫" },
-  { v: "example", label: "Example", emoji: "🍎" },
-  { v: "quiz", label: "Quiz", emoji: "🎯" },
-  { v: "check", label: "Say it back", emoji: "🔁" },
-  { v: "summary", label: "Summary", emoji: "📝" }
-] as const;
+const MODES: { v: Mode; icon: string }[] = [
+  { v: "explain", icon: "💡" },
+  { v: "hint", icon: "🤫" },
+  { v: "example", icon: "🍎" },
+  { v: "quiz", icon: "🎯" },
+  { v: "check", icon: "🔁" },
+  { v: "summary", icon: "📝" },
+];
 
-function ChatContent() {
-  const searchParams = useSearchParams();
-  const initialQuery = searchParams.get("q");
-  const initialSubject = searchParams.get("subject") || "Science";
+const STARTERS: Record<UiLang, string[]> = {
+  en: ["Why do volcanoes erupt?", "What is 3/4 of a pizza?", "Why does the Moon change shape?", "Who was Hannibal?"],
+  fr: ["Pourquoi les volcans entrent-ils en éruption ?", "C'est quoi une fraction ?", "Pourquoi la Lune change de forme ?", "Qui était Hannibal ?"],
+  ar: ["لماذا تثور البراكين؟", "ما هو الكسر؟", "لماذا يتغيّر شكل القمر؟", "من هو حنبعل؟"],
+  darija: ["علاش البركان يتفجّر؟", "شنوة معناها كسر في الحساب؟", "علاش القمر يبدّل شكلو؟", "شكون حنبعل؟"],
+};
 
-  const [messages, setMessages] = useState<{ role: string; text: string }[]>([
-    { role: "assistant", text: `Great observation, Alex! Imagine Earth like a warm, freshly baked pie with a crunchy crust. Deep underneath that crust, it's so hot that rock melts into a glowing liquid called magma. Let's explore ${initialSubject} together!` }
-  ]);
+// Preferred voice languages, best first. Darija has no dedicated voice: Tunisian, then other Arabic voices.
+const VOICE_LANGS: Record<string, string[]> = {
+  en: ["en-gb", "en-us", "en"],
+  fr: ["fr-fr", "fr-ca", "fr"],
+  ar: ["ar-sa", "ar-eg", "ar-tn", "ar"],
+  darija: ["ar-tn", "ar-ma", "ar-dz", "ar-eg", "ar-sa", "ar"],
+};
+
+function loadVoices(): Promise<SpeechSynthesisVoice[]> {
+  const now = window.speechSynthesis.getVoices();
+  if (now.length) return Promise.resolve(now);
+  return new Promise((resolve) => {
+    const done = () => resolve(window.speechSynthesis.getVoices());
+    window.speechSynthesis.addEventListener("voiceschanged", done, { once: true });
+    setTimeout(done, 1200);
+  });
+}
+
+function pickVoice(voices: SpeechSynthesisVoice[], lang: string): SpeechSynthesisVoice | null {
+  for (const code of VOICE_LANGS[lang] ?? [lang]) {
+    const matches = voices.filter((v) => v.lang.toLowerCase().replace("_", "-").startsWith(code));
+    if (matches.length) {
+      // Natural/online voices sound far better than the old desktop ones.
+      return matches.find((v) => /natural|online|google/i.test(v.name)) ?? matches[0];
+    }
+  }
+  return null;
+}
+
+/** Splits long answers so Chrome doesn't cut speech after ~15 s. */
+function speechChunks(text: string): string[] {
+  const clean = text.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/gu, "").replace(/\s+/g, " ").trim();
+  return clean.match(/[^.!?؟…]+[.!?؟…]*/g)?.map((s) => s.trim()).filter(Boolean) ?? [clean];
+}
+const uid = () => Math.random().toString(36).slice(2, 10);
+
+function ChatPage() {
+  const params = useSearchParams();
+  const subject = params.get("subject") || "General";
+  const initialQ = params.get("q");
+  const kid = useKid();
+  const [lang, setLang] = useUiLang(kid);
+
+  const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
   const [mode, setMode] = useState<Mode>("explain");
-  const [isGroupMode, setIsGroupMode] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [isThemeModalOpen, setIsThemeModalOpen] = useState(false);
-  const [fileName, setFileName] = useState<string | null>(null);
+  const [group, setGroup] = useState(false);
+  const [pending, setPending] = useState<{ stages: Stage[]; startedAt: number } | null>(null);
+  const [now, setNow] = useState(0);
+  const [speaking, setSpeaking] = useState<string | null>(null);
+
+  // When the child switches language, answers already on screen follow (one by one, switching back is instant).
+  const messagesRef = useRef<Msg[]>([]);
+  useEffect(() => {
+    messagesRef.current = messages;
+  });
+  useEffect(() => {
+    const todo = messagesRef.current.filter((m) => m.role === "assistant" && !m.error && m.result && m.result.lang !== lang);
+    if (!todo.length) return;
+    let cancelled = false;
+    window.speechSynthesis?.cancel();
+    const patch = (id: string, f: (m: Msg) => Msg) => setMessages((ms) => ms.map((x) => (x.id === id ? f(x) : x)));
+    (async () => {
+      for (const m of todo) {
+        if (cancelled) return;
+        const from = m.result!.lang as UiLang;
+        const known = m.alts?.[lang];
+        if (known) {
+          patch(m.id, (x) => ({ ...x, text: known, alts: { ...x.alts, [from]: x.text }, result: { ...x.result!, lang }, translateNote: "" }));
+          continue;
+        }
+        patch(m.id, (x) => ({ ...x, translating: true, translateNote: "" }));
+        try {
+          const r = await fetch("/api/translate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: m.text, to: lang }) });
+          const d = await r.json();
+          if (!d.ok) throw new Error(d.error);
+          patch(m.id, (x) => ({ ...x, text: d.text, translating: false, alts: { ...x.alts, [from]: x.text, [lang]: d.text }, result: { ...x.result!, lang } }));
+        } catch {
+          patch(m.id, (x) => ({ ...x, translating: false, translateNote: t(lang, "tr_failed") }));
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [lang]);
+  const [voiceNote, setVoiceNote] = useState("");
+  const [party, setParty] = useState(0);
+  const endRef = useRef<HTMLDivElement>(null);
+  const sentInitial = useRef(false);
 
   useEffect(() => {
-    if (initialQuery) {
-      setInput(initialQuery);
-      setTimeout(() => {
-        triggerSend(initialQuery);
-      }, 500);
-    }
-  }, [initialQuery]);
+    if (!pending) return;
+    const id = setInterval(() => setNow(Date.now()), 250);
+    return () => clearInterval(id);
+  }, [pending]);
 
-  async function triggerSend(query: string) {
-    if (!query.trim() || loading) return;
-    setInput("");
-    setMessages((m) => [...m, { role: "user", text: query }]);
-    setLoading(true);
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [messages.length, pending?.stages.length]);
 
-    try {
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ 
-          message: query, 
-          mode: mode,
-          isGroupMode: isGroupMode,
-          companion: "EdNova Buddy",
-          subject: initialSubject,
-          grade: 4
-        })
-      });
-      
-      const data = await res.json();
-      
-      if (data.ok) {
-        setMessages((m) => [...m, { 
-          role: "assistant", 
-          text: data.answer + (data.fallbackUsed ? " ⚡ (Fast Mode)" : "") 
-        }]);
-      } else {
-        setMessages((m) => [...m, { role: "assistant", text: "I am resting. Please try again." }]);
+  const send = useCallback(
+    async (text: string, sendMode: Mode = mode) => {
+      const q = text.trim();
+      if (!q || pending) return;
+      setInput("");
+      const history = messages.slice(-6).map((m) => ({ role: m.role, text: m.text }));
+      setMessages((m) => [...m, { id: uid(), role: "user", text: q }]);
+      setPending({ stages: [{ key: "reading", at: Date.now() }], startedAt: Date.now() });
+
+      const fail = (msg: string) =>
+        setMessages((m) => [...m, { id: uid(), role: "assistant", text: msg, error: true, retry: { text: q, mode: sendMode } }]);
+
+      try {
+        const res = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: q, mode: sendMode, subject, language: lang, history, isGroupMode: group }),
+        });
+        if (res.status === 401) {
+          window.location.assign("/login");
+          return;
+        }
+        let data = await res.json();
+        if (!data.ok) {
+          fail(data.error || t(lang, "errorGeneric"));
+          return;
+        }
+        const deadline = Date.now() + 3 * 60_000;
+        while (data.status === "running" && Date.now() < deadline) {
+          setPending((p) => (p ? { ...p, stages: data.stages?.length ? data.stages : p.stages } : p));
+          await new Promise((r) => setTimeout(r, 700));
+          const poll = await fetch(`/api/chat/${data.jobId}`, { cache: "no-store" });
+          if (poll.status === 401) {
+            window.location.assign("/login");
+            return;
+          }
+          data = await poll.json();
+          if (!data.ok) break;
+        }
+        if (data.status === "done" && data.result) {
+          const r: Result = data.result;
+          // Celebrate a right answer the child checked (quiz pick or "explain it back").
+          if ((sendMode === "check" || r.notices.includes("auto_check")) && soundsRight(r.answer)) setParty(Date.now());
+          setMessages((m) => [
+            ...m,
+            { id: uid(), role: "assistant", text: r.answer, question: q, result: r, retry: r.retryAfterSec ? { text: q, mode: sendMode } : undefined },
+          ]);
+        } else {
+          fail(data.error || t(lang, "errorGeneric"));
+        }
+      } catch {
+        fail(typeof navigator !== "undefined" && !navigator.onLine ? offlineMessage(lang) : t(lang, "errorGeneric"));
+      } finally {
+        setPending(null);
       }
-    } catch (e) {
-      setMessages((m) => [...m, { role: "assistant", text: "Something went wrong." }]);
-    } finally {
-      setLoading(false);
+    },
+    [mode, pending, messages, subject, lang, group],
+  );
+
+  useEffect(() => {
+    if (initialQ && kid && !sentInitial.current) {
+      sentInitial.current = true;
+      send(initialQ);
     }
+  }, [initialQ, kid, send]);
+
+  // Voice output only, generated by the browser. Nothing is recorded or stored.
+  async function speak(m: Msg) {
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+      setVoiceNote(t(lang, "noSpeech"));
+      return;
+    }
+    window.speechSynthesis.cancel();
+    if (speaking === m.id) {
+      setSpeaking(null);
+      return;
+    }
+    const answerLang = m.result?.lang || lang;
+    const voice = pickVoice(await loadVoices(), answerLang);
+    if (!voice) {
+      setVoiceNote(t(lang, `noVoice_${answerLang}`));
+      return;
+    }
+    setVoiceNote("");
+    const parts = speechChunks(m.text);
+    setSpeaking(m.id);
+    parts.forEach((part, i) => {
+      const u = new SpeechSynthesisUtterance(part);
+      u.voice = voice;
+      u.lang = voice.lang;
+      u.rate = answerLang === "en" ? 0.95 : 0.9;
+      if (i === parts.length - 1) u.onend = () => setSpeaking(null);
+      u.onerror = () => setSpeaking(null);
+      window.speechSynthesis.speak(u);
+    });
   }
 
-  function send() {
-    triggerSend(input);
-  }
+  const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant" && !m.error);
+  const lastQuestion = [...messages].reverse().find((m) => m.role === "user")?.text ?? "";
+
+  // What Nouri, the study buddy, reacts to: waiting, a fresh answer, a right or "not yet" answer, a picture to look at.
+  const lastMsg = messages[messages.length - 1];
+  const buddyState: BuddyState = pending
+    ? { kind: "thinking", queued: ["queued", "waiting_quota"].includes(pending.stages[pending.stages.length - 1]?.key ?? "") }
+    : lastMsg?.role === "assistant" && lastMsg.result
+      ? {
+          kind: "answered",
+          right: verdictOf(lastMsg.text, lastMsg.result.route.endsWith("_check") || lastMsg.result.notices.includes("auto_check")),
+          hasPicture: !!lastMsg.question && parseCalculation(lastMsg.question) !== null && !/^(local_|triage_|model_refusal|deferred)/.test(lastMsg.result.route),
+          mode: lastMsg.result.route.split("_")[1] ?? "",
+        }
+      : { kind: "idle" };
 
   return (
-    <main className="w-full pt-20 bg-[#f8f9ff] flex-1 max-w-[1280px] mx-auto px-6">
-      
-      <header className="fixed top-0 left-0 right-0 w-full z-50 bg-white/95 backdrop-blur-xl shadow-[0_4px_20px_rgba(39,50,64,0.06)]">
-        <div className="h-20 max-w-[1280px] mx-auto px-6 flex items-center justify-between gap-6">
-          <div className="flex items-center gap-3 flex-shrink-0">
-            <div className="w-8 h-8 bg-blue-600 rounded-full flex items-center justify-center text-white font-bold">E</div>
-            <span className="text-xl text-blue-600 tracking-tight font-extrabold">EdNova</span>
-          </div>
-          <nav className="hidden lg:flex items-center bg-[#eef4ff] p-1 rounded-full gap-1">
-            <Link href="/dashboard" className="px-4 py-2 rounded-full text-sm font-bold text-gray-600 hover:bg-white transition-all">Dashboard</Link>
-            <Link href="/" className="px-4 py-2 rounded-full text-sm font-bold bg-blue-600 text-white shadow-[0_3px_0_#00419c]">Ask EdNova</Link>
-            <Link href="/companions" className="px-4 py-2 rounded-full text-sm font-bold text-gray-600 hover:bg-white transition-all">My Companions</Link>
-            <Link href="/parent" className="px-4 py-2 rounded-full text-sm font-bold text-gray-600 hover:bg-white transition-all">Parent Insights</Link>
-            <Link href="/explore" className="px-4 py-2 rounded-full text-sm font-bold text-gray-600 hover:bg-white transition-all">Explore Subjects</Link>
-          </nav>
-          <div className="flex items-center gap-3 flex-shrink-0">
-            <div className="flex items-center gap-1 bg-[#ffd9e3] text-[#3e001e] px-3 py-1 rounded-full shadow-[0_2px_0_rgba(142,0,76,0.18)]">
-              <span className="material-symbols-outlined text-[#af2464] text-[20px]">local_fire_department</span>
-              <span className="text-xs font-bold">5 Day Streak</span>
-            </div>
-            <div className="flex items-center gap-1 bg-[#ffe087] text-[#231a00] px-3 py-1 rounded-full shadow-[0_2px_0_rgba(87,69,0,0.18)]">
-              <span className="material-symbols-outlined text-[#735c00] text-[20px]">monetization_on</span>
-              <span className="text-xs font-bold">240 Coins</span>
-            </div>
-            <div className="flex items-center gap-2 bg-white pl-1 pr-3 py-1 rounded-full shadow-[0_2px_8px_rgba(0,0,0,0.06)]">
-              <div className="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center text-white text-sm font-bold">A</div>
-              <span className="text-sm font-bold text-gray-800">Alex</span>
-            </div>
-          </div>
-        </div>
-      </header>
-
-      <header className="sticky top-24 z-30 w-full bg-[#eef4ff]/90 backdrop-blur-md px-4 py-3 rounded-2xl shadow-sm mb-6 flex flex-wrap items-center justify-between gap-3 mt-4">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-full bg-[#e5eeff] flex items-center justify-center text-blue-600">
-            <span className="material-symbols-outlined text-[22px]">volcano</span>
-          </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-bold text-[#fe64a2] uppercase tracking-wider">Current Exploration</span>
-              <span className="w-1.5 h-1.5 rounded-full bg-[#fe64a2]"></span>
-              <span className="text-xs font-bold text-gray-500">Grade 4 • {initialSubject}</span>
-            </div>
-            <h1 className="text-xl font-bold text-gray-800 truncate">Exploring {initialSubject} 🌋</h1>
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <button onClick={() => setIsThemeModalOpen(true)} className="flex items-center gap-2 bg-white px-4 py-2 rounded-full text-sm font-bold shadow-sm hover:bg-gray-50 transition-all">
-            <span className="flex -space-x-1">
-              <span className="w-2.5 h-2.5 rounded-full bg-blue-300"></span>
-              <span className="w-2.5 h-2.5 rounded-full bg-pink-300"></span>
-              <span className="w-2.5 h-2.5 rounded-full bg-yellow-300"></span>
-            </span>
-            Message Style 🎨
-          </button>
-          <button onClick={() => setMessages([])} className="w-10 h-10 rounded-full bg-[#e5eeff] hover:bg-gray-200 flex items-center justify-center text-gray-600 transition-all" title="Clear Chat">
-            <span className="material-symbols-outlined text-[18px]">restart_alt</span>
-          </button>
-        </div>
-      </header>
-
-      <div className="mb-4 flex flex-wrap gap-2">
-        {MODES.map((m) => (
-          <button key={m.v} onClick={() => setMode(m.v)}
-            className={`rounded-full border px-4 py-2 text-sm transition-colors ${mode === m.v ? "border-blue-600 bg-blue-50 font-bold text-blue-700" : "border-gray-200 bg-white text-gray-600 hover:bg-gray-50"}`}>
-            {m.emoji} {m.label}
-          </button>
-        ))}
-      </div>
-
-      <section className="flex flex-col gap-6 pb-44 max-w-4xl mx-auto w-full">
-        {messages.map((m, i) => (
-          <div key={i} className={m.role === "user" ? "flex flex-col items-end self-end max-w-xl" : "flex flex-col gap-4"}>
-            {m.role === "user" ? (
-              <div className="bg-blue-100 text-blue-900 rounded-2xl rounded-tr-sm px-5 py-3 shadow-[0_4px_0_rgba(0,65,156,0.15)]">
-                <p className="text-lg font-semibold">{m.text}</p>
-              </div>
-            ) : (
-              <>
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-full bg-blue-600 text-white flex items-center justify-center shadow-[0_3px_0_#00419c]">
-                    <span className="material-symbols-outlined text-[24px]">school</span>
-                  </div>
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-lg font-bold text-blue-600">EdNova Buddy</span>
-                      <span className="bg-[#ffe087] text-[#231a00] text-xs font-bold px-2 py-0.5 rounded-full">Guide</span>
-                    </div>
-                  </div>
-                </div>
-                <div className="pl-12">
-                  <p className="text-lg text-gray-800 leading-relaxed whitespace-pre-wrap">{m.text}</p>
-                </div>
-              </>
+    <KidShell active="ask" lang={lang} kid={kid}>
+      <Confetti fire={party} />
+      {messages.length > 0 && (
+        <StudyBuddy
+          lang={lang}
+          state={buddyState}
+          cheer={party}
+          canRead={!!lastAssistant}
+          canQuiz={!!lastQuestion && !pending}
+          onRead={() => lastAssistant && speak(lastAssistant)}
+          onQuiz={() => send(lastQuestion, "quiz")}
+          topic={topicOf(subject, lastQuestion)}
+          talking={speaking !== null}
+        />
+      )}
+      <main className="cahier cahier-margin flex-1 flex flex-col">
+        {/* Toolbar: subject, language, group mode */}
+        <div className="sticky top-[68px] z-30 bg-paper/90 backdrop-blur border-b border-line">
+          <div className="mx-auto max-w-3xl ps-10 pe-4 sm:ps-20 py-2 flex items-center gap-2">
+            {messages.length > 0 && !pending && (
+              <button
+                onClick={() => {
+                  // Back to the start screen (Nouri, stickers, puzzle). Nothing is stored, so nothing to delete.
+                  setMessages([]);
+                  window.speechSynthesis?.cancel();
+                  window.history.replaceState(null, "", "/");
+                }}
+                className="h-12 px-4 shrink-0 rounded-full bg-marker border-2 border-night font-extrabold text-sm inline-flex items-center gap-1.5 shadow-[2px_2px_0_var(--color-night)] active:translate-y-0.5"
+              >
+                <span aria-hidden>✨</span> <span className="hidden sm:inline">{t(lang, "newChat")}</span>
+              </button>
             )}
-          </div>
-        ))}
-
-        {loading && (
-          <div className="flex items-start gap-3 pl-12">
-            <div className="bg-white rounded-2xl px-5 py-3 shadow-sm flex items-center gap-4">
-              <div className="flex items-center gap-1.5">
-                <span className="w-2.5 h-2.5 rounded-full bg-blue-500 animate-bounce"></span>
-                <span className="w-2.5 h-2.5 rounded-full bg-pink-500 animate-bounce [animation-delay:0.2s]"></span>
-                <span className="w-2.5 h-2.5 rounded-full bg-yellow-500 animate-bounce [animation-delay:0.4s]"></span>
-              </div>
-              <div className="flex flex-col">
-                <span className="text-sm font-bold text-gray-800">EdNova is brewing an exciting answer...</span>
-              </div>
-            </div>
-          </div>
-        )}
-      </section>
-
-      <div className="fixed bottom-0 left-0 right-0 z-40 w-full pb-4 bg-gradient-to-t from-[#f8f9ff] to-transparent">
-        <div className="max-w-[1280px] mx-auto px-6 flex flex-col items-center">
-          <div className="w-full max-w-4xl relative">
-            <div className="absolute -top-16 left-6 z-20 flex items-end">
-              <div className="relative w-20 h-20 -mb-2">
-                <svg className="w-full h-full drop-shadow-lg" viewBox="0 0 100 100">
-                  <ellipse cx="28" cy="42" fill="#7ba8f8" rx="18" ry="22" transform="rotate(-15 28 42)"></ellipse>
-                  <ellipse cx="28" cy="42" fill="#ffd9e3" rx="12" ry="15" transform="rotate(-15 28 42)"></ellipse>
-                  <ellipse cx="72" cy="42" fill="#7ba8f8" rx="18" ry="22" transform="rotate(15 72 42)"></ellipse>
-                  <ellipse cx="72" cy="42" fill="#ffd9e3" rx="12" ry="15" transform="rotate(15 72 42)"></ellipse>
-                  <ellipse cx="50" cy="50" fill="#3478F6" rx="30" ry="28"></ellipse>
-                  <circle cx="39" cy="48" fill="#ffffff" fillOpacity="0.25" r="10" stroke="#FFE087" strokeWidth="3"></circle>
-                  <circle cx="61" cy="48" fill="#ffffff" fillOpacity="0.25" r="10" stroke="#FFE087" strokeWidth="3"></circle>
-                  <line stroke="#FFE087" strokeLinecap="round" strokeWidth="3" x1="49" x2="51" y1="48" y2="48"></line>
-                  <ellipse cx="40" cy="49" fill="#001945" rx="3.5" ry="4"></ellipse>
-                  <ellipse cx="62" cy="49" fill="#001945" rx="3.5" ry="4"></ellipse>
-                  <path d="M47 56 C46 64, 44 74, 54 75 C60 76, 61 70, 56 68 C52 66, 52 64, 53 56" fill="#256eec" stroke="#00419c" strokeWidth="1.5"></path>
-                </svg>
-              </div>
-            </div>
-
-            <div className="bg-white/95 backdrop-blur-xl rounded-2xl shadow-[0_12px_32px_rgba(39,50,64,0.12)] p-3 flex flex-col gap-2">
-              <textarea 
-                value={input} 
-                onChange={(e) => setInput(e.target.value)} 
-                onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
-                placeholder="Ask EdNova another question..." 
-                className="w-full bg-transparent px-3 py-2 text-gray-800 placeholder-gray-400 focus:outline-none resize-none max-h-32"
-                rows={1}
-              />
-              <div className="flex items-center justify-between pt-1">
-                <div className="flex items-center gap-2">
-                  <button className="w-10 h-10 rounded-full hover:bg-gray-100 text-gray-500 flex items-center justify-center transition-colors">
-                    <span className="material-symbols-outlined text-[20px]">attach_file</span>
-                  </button>
-                  
-                  {/* DRAW / PHOTO UPLOAD */}
-                  <label className={`flex items-center gap-1 px-3 h-10 rounded-full text-sm font-bold transition-colors cursor-pointer ${fileName ? "bg-blue-100 text-blue-700 border-2 border-blue-400" : "bg-gray-50 hover:bg-gray-100 text-gray-800 border-2 border-transparent"}`}>
-                    <input 
-                      type="file" 
-                      accept="image/*" 
-                      className="hidden" 
-                      onChange={(e) => {
-                        const file = e.target.files?.[0];
-                        if (file) {
-                          setFileName(file.name);
-                          setMessages((m) => [...m, { role: "user", text: `📸 Attached a photo: ${file.name}` }]);
-                        }
-                      }}
-                    />
-                    <span className={`material-symbols-outlined text-[18px] ${fileName ? "text-blue-600" : "text-blue-500"}`}>draw</span>
-                    <span className="hidden sm:inline">{fileName ? "Photo Attached" : "Draw / Photo"}</span>
-                  </label>
-
-                  {/* HINTS MODE TOGGLE */}
-                  <button 
-                    onClick={() => setMode(mode === "hint" ? "explain" : "hint")} 
-                    className={`flex items-center gap-1 px-3 h-10 rounded-full text-sm font-bold transition-all ${mode === "hint" ? "bg-pink-100 text-pink-700 border-2 border-pink-400" : "bg-gray-50 hover:bg-gray-100 text-gray-800 border-2 border-transparent"}`}
-                  >
-                    <span className={`material-symbols-outlined text-[18px] ${mode === "hint" ? "text-pink-600" : "text-pink-500"}`}>psychology</span>
-                    <span className="hidden sm:inline">{mode === "hint" ? "Hints ON" : "Hints Mode"}</span>
-                  </button>
-                </div>
-                
-                <button onClick={send} disabled={loading} className="w-11 h-11 rounded-full bg-blue-600 text-white flex items-center justify-center shadow-[0_4px_0_#00419c] hover:bg-blue-700 active:translate-y-0.5 transition-all disabled:opacity-50">
-                  <span className="material-symbols-outlined text-[22px]">arrow_upward</span>
+            <span className="hidden sm:inline-flex h-10 px-3 items-center gap-1.5 rounded-full bg-white border-2 border-line font-bold text-sm">
+              <span aria-hidden>📚</span> {subject}
+            </span>
+            <div role="radiogroup" aria-label="Language" className="flex rounded-full bg-white border-2 border-line p-1 overflow-x-auto no-scrollbar">
+              {(Object.keys(LANG_LABEL) as UiLang[]).map((l) => (
+                <button
+                  key={l}
+                  role="radio"
+                  aria-checked={lang === l}
+                  onClick={() => setLang(l)}
+                  className={`h-10 min-w-12 px-2.5 sm:px-3 rounded-full text-sm font-bold whitespace-nowrap ${lang === l ? "bg-magic" : "text-night hover:bg-grape-soft"}`}
+                >
+                  {LANG_LABEL[l]}
                 </button>
-              </div>
+              ))}
             </div>
-          </div>
-        </div>
-      </div>
-
-      {isThemeModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-black/40 backdrop-blur-sm">
-          <div className="bg-white max-w-lg w-full rounded-2xl p-6 shadow-2xl flex flex-col gap-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-full bg-pink-100 text-pink-600 flex items-center justify-center">
-                  <span className="material-symbols-outlined text-[22px]">palette</span>
-                </div>
-                <div>
-                  <h2 className="text-lg font-bold text-gray-800">Choose Your Bubble Style</h2>
-                  <p className="text-sm text-gray-500">Customize your personal chat bubbles!</p>
-                </div>
-              </div>
-              <button onClick={() => setIsThemeModalOpen(false)} className="w-9 h-9 rounded-full bg-gray-100 hover:bg-gray-200 flex items-center justify-center text-gray-600">
-                <span className="material-symbols-outlined text-[18px]">close</span>
-              </button>
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <button className="p-4 rounded-xl text-left bg-gray-50 border-2 border-blue-500">
-                <span className="text-lg font-bold text-gray-800">Ocean Breeze</span>
-                <p className="text-sm text-gray-500">Sky Fresh Blue</p>
-              </button>
-              <button className="p-4 rounded-xl text-left bg-gray-50 hover:bg-gray-100">
-                <span className="text-lg font-bold text-gray-800">Cotton Candy</span>
-                <p className="text-sm text-gray-500">Berry Soft Pink</p>
-              </button>
-            </div>
-            <button onClick={() => setIsThemeModalOpen(false)} className="w-full py-3 rounded-full bg-blue-600 text-white font-bold shadow-[0_3px_0_#00419c] active:translate-y-0.5">
-              Done & Return to Chat
+            <button
+              onClick={() => setGroup((g) => !g)}
+              aria-pressed={group}
+              aria-label={t(lang, "group")}
+              className={`h-12 min-w-12 px-3 sm:px-4 ms-auto rounded-full border-2 text-sm font-bold inline-flex items-center justify-center gap-2 ${group ? "bg-leaf-soft border-leaf text-night" : "bg-white border-line"}`}
+            >
+              <span aria-hidden>👥</span> <span className="hidden sm:inline">{group ? t(lang, "groupOn") : t(lang, "group")}</span>
             </button>
           </div>
         </div>
-      )}
-    </main>
+
+        <section className="mx-auto w-full max-w-3xl ps-10 pe-4 sm:ps-20 pt-6 pb-64 flex flex-col gap-6" aria-live="polite">
+          {messages.length === 0 && !pending && (
+            <div className="pt-4 flex flex-col gap-6">
+              <NovaHero lang={lang} name={kid?.nickname} />
+              <div>
+                <h1 className="text-3xl sm:text-4xl font-extrabold text-night leading-tight" dir="auto">
+                  {kid ? `${kid.avatar} ` : ""}
+                  {t(lang, "hello")}
+                </h1>
+                <p className="mt-1 text-muted text-lg" dir="auto">{t(lang, "helloSub")}</p>
+              </div>
+              <StickerStarters items={STARTERS[lang]} onPick={(q) => send(q)} />
+              <DailyPuzzle lang={lang} onWin={() => setParty(Date.now())} onAsk={(q) => send(q)} />
+            </div>
+          )}
+
+          {messages.map((m) =>
+            m.role === "user" ? (
+              <div key={m.id} className="self-end max-w-[85%] note px-4 py-3 -rotate-[0.5deg]">
+                <p dir="auto" className="text-lg font-semibold text-night whitespace-pre-wrap">{m.text}</p>
+              </div>
+            ) : (
+              <AssistantMessage
+                key={m.id}
+                m={m}
+                lang={lang}
+                speaking={speaking === m.id}
+                onSpeak={() => speak(m)}
+                onRetry={(r) => send(r.text, r.mode)}
+                onPick={(choice) => send(choice, "check")}
+              />
+            ),
+          )}
+
+          {voiceNote && (
+            <div role="status" className="note px-4 py-3 text-sm font-semibold text-night flex items-start gap-2" dir="auto">
+              <span aria-hidden>🔇</span>
+              <span className="flex-1">{voiceNote}</span>
+              <button onClick={() => setVoiceNote("")} className="w-8 h-8 -m-1 rounded-full hover:bg-black/5" aria-label="Close">×</button>
+            </div>
+          )}
+          {pending && <Progress stages={pending.stages} startedAt={pending.startedAt} now={now} lang={lang} />}
+          <div ref={endRef} className="scroll-mb-[280px]" />
+        </section>
+
+        {/* Composer */}
+        <div className="composer-dock fixed inset-x-0 bottom-[calc(76px+env(safe-area-inset-bottom))] md:bottom-0 z-30 bg-gradient-to-t from-paper via-paper/95 to-transparent pt-6">
+          <div className="mx-auto max-w-3xl ps-10 pe-4 sm:ps-20 pb-4">
+            {lastAssistant && !pending && (
+              <nav aria-label={t(lang, "nextTitle")} className="mb-2 flex items-center gap-2 overflow-x-auto no-scrollbar">
+                <span className="shrink-0 text-sm font-extrabold text-muted" dir="auto">{t(lang, "nextTitle")}</span>
+                {/* A Socratic loop: a nudge first, then an example, then practice, then the child teaches it back. */}
+                {(
+                  [
+                    ["hint", "🤫", "moreHint"],
+                    ["example", "🍎", "nextExample"],
+                    ["quiz", "🎯", "quizMe"],
+                    ["check", "🔁", "nextExplainBack"],
+                  ] as const
+                ).map(([m, icon, label]) => (
+                  <button
+                    key={m}
+                    onClick={() => send(lastQuestion, m)}
+                    className="h-12 px-4 shrink-0 rounded-full bg-white border-2 border-line font-bold text-sm whitespace-nowrap hover:border-ink"
+                  >
+                    <span aria-hidden>{icon}</span> {t(lang, label)}
+                  </button>
+                ))}
+              </nav>
+            )}
+            <div className="rounded-[var(--radius-card)] bg-white border-2 border-night shadow-[4px_4px_0_var(--color-night)] p-2">
+              <div role="radiogroup" aria-label="How should Nouri help?" className="flex sm:flex-wrap gap-1.5 overflow-x-auto no-scrollbar pb-2">
+                {MODES.map((m) => (
+                  <button
+                    key={m.v}
+                    role="radio"
+                    aria-checked={mode === m.v}
+                    onClick={() => setMode(m.v)}
+                    className={`h-12 px-3.5 shrink-0 rounded-full text-[15px] font-bold inline-flex items-center gap-1.5 border-2 ${
+                      mode === m.v ? "bg-marker border-night text-night" : "bg-paper border-transparent text-night hover:border-line"
+                    }`}
+                  >
+                    <span aria-hidden className="text-xl leading-none">{m.icon}</span>
+                    {t(lang, `m_${m.v}`)}
+                  </button>
+                ))}
+              </div>
+              <form
+                className="flex items-end gap-2"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  send(input);
+                }}
+              >
+                <label htmlFor="ask" className="sr-only">{t(lang, "placeholder")}</label>
+                <textarea
+                  id="ask"
+                  dir="auto"
+                  value={input}
+                  maxLength={600}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      send(input);
+                    }
+                  }}
+                  placeholder={t(lang, "placeholder")}
+                  rows={1}
+                  className="flex-1 min-h-14 max-h-36 resize-none bg-transparent px-3 py-3.5 text-lg text-night placeholder:text-muted focus:outline-none"
+                />
+                <button
+                  type="submit"
+                  disabled={!input.trim() || !!pending}
+                  aria-label={t(lang, "send")}
+                  className="btn-press w-14 h-14 shrink-0 rounded-full bg-magic grid place-items-center disabled:opacity-40 disabled:shadow-none"
+                >
+                  <svg viewBox="0 0 24 24" className={`w-7 h-7 ${isRtl(lang) ? "-scale-x-100" : ""}`} aria-hidden>
+                    <path d="M4 12h14M13 6l6 6-6 6" stroke="currentColor" strokeWidth="2.6" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </button>
+              </form>
+            </div>
+          </div>
+        </div>
+      </main>
+    </KidShell>
+  );
+}
+
+function Badge({ r, lang }: { r: Result; lang: UiLang }) {
+  const map = {
+    compact: { icon: "⚡", cls: "bg-marker-soft" },
+    mid: { icon: "🧠", cls: "bg-ink-soft" },
+    cache: { icon: "📦", cls: "bg-leaf-soft" },
+    local: { icon: "🛡️", cls: "bg-margin-soft" },
+  }[r.modelClass];
+  // Answers built from the team's notes (Arabic/Darija) are not safety replies: say where they come from.
+  const curated = r.route.startsWith("curated_");
+  return (
+    <span className={`h-7 px-2.5 inline-flex items-center gap-1 rounded-full text-xs font-extrabold text-night ${curated ? "bg-leaf-soft" : map.cls}`}>
+      <span aria-hidden>{curated ? "📒" : map.icon}</span>
+      {t(lang, curated ? "b_curated" : `b_${r.modelClass}`)}
+      <span className="font-semibold text-muted">· {(r.ms / 1000).toFixed(1)}s</span>
+    </span>
+  );
+}
+
+function AssistantMessage({
+  m,
+  lang,
+  speaking,
+  onSpeak,
+  onRetry,
+  onPick,
+}: {
+  m: Msg;
+  lang: UiLang;
+  speaking: boolean;
+  onSpeak: () => void;
+  onRetry: (r: { text: string; mode: Mode }) => void;
+  onPick: (choice: string) => void;
+}) {
+  const r = m.result;
+  const options = m.text.split("\n").filter((l) => /^\s*[AB][).:]\s+/.test(l));
+  const [countdown, setCountdown] = useState(r?.retryAfterSec ?? 0);
+  useEffect(() => {
+    if (!countdown) return;
+    const id = setTimeout(() => setCountdown((c) => c - 1), 1000);
+    return () => clearTimeout(id);
+  }, [countdown]);
+
+  return (
+    <article className="flex gap-3 items-start">
+      <NovaFace className="w-11 h-11 shrink-0 -mt-1" mood={m.error ? "thinking" : "happy"} />
+      <div className="flex-1 min-w-0">
+        {r?.confused && <p className="mb-1 text-sm font-bold text-leaf" dir="auto">🐢 {t(lang, "confused")}</p>}
+        <p dir="auto" className={`text-[19px] leading-[28px] whitespace-pre-wrap transition-opacity ${m.translating ? "opacity-40" : ""} ${m.error ? "text-margin font-semibold" : "text-night"}`}>
+          {m.text}
+        </p>
+        {m.translating && (
+          <p role="status" className="mt-1 text-sm font-bold text-grape" dir="auto">
+            🌐 {t(lang, "tr_working")}
+          </p>
+        )}
+        {m.translateNote && (
+          <p role="status" className="mt-1 text-sm font-bold text-margin" dir="auto">
+            {m.translateNote}
+          </p>
+        )}
+
+        {!m.error && m.question && !/^(local_|triage_|model_refusal|deferred)/.test(m.result?.route ?? "") && <MathVisual question={m.question} lang={(m.result?.lang as UiLang) || lang} />}
+
+        {options.length === 2 && (
+          <div className="mt-3 grid sm:grid-cols-2 gap-2">
+            {options.map((o) => (
+              <button key={o} onClick={() => onPick(o.trim())} dir="auto" className="min-h-14 px-4 rounded-2xl bg-white border-2 border-ink text-start font-bold text-night hover:bg-ink-soft">
+                {o.trim()}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {r && (r.notices.length > 0 || r.sources.length > 0) && (
+          <ul className="mt-3 space-y-1 text-sm text-muted" dir="auto">
+            {r.notices
+              .filter((n) => n !== "deferred")
+              .map((n) => (
+                <li key={n}>ℹ️ {t(lang, `n_${n}`)}</li>
+              ))}
+            {r.sources.length > 0 && (
+              <li>
+                📒 {t(lang, "fromNotes")} <span className="marker font-semibold text-night">{r.sources.join(", ")}</span>
+              </li>
+            )}
+          </ul>
+        )}
+
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          {r && <Badge r={r} lang={lang} />}
+          {!m.error && (
+            <button onClick={onSpeak} aria-pressed={speaking} className="h-11 px-3.5 rounded-full bg-white border-2 border-line text-sm font-bold inline-flex items-center gap-1.5">
+              <span aria-hidden>{speaking ? "⏹️" : "🔊"}</span> {speaking ? t(lang, "stop") : t(lang, "readAloud")}
+            </button>
+          )}
+          {m.retry && (
+            <button
+              onClick={() => onRetry(m.retry!)}
+              disabled={countdown > 0}
+              className="btn-press h-12 px-4 rounded-full bg-ink text-white text-sm font-extrabold disabled:opacity-60 disabled:shadow-none"
+            >
+              ↻ {countdown > 0 ? `${t(lang, "n_deferred")} ${countdown}${t(lang, "seconds")}` : t(lang, "tryAgain")}
+            </button>
+          )}
+        </div>
+      </div>
+    </article>
+  );
+}
+
+function Progress({ stages, startedAt, now, lang }: { stages: Stage[]; startedAt: number; now: number; lang: UiLang }) {
+  const elapsed = Math.max(0, (now - startedAt) / 1000);
+  const current = stages[stages.length - 1];
+  return (
+    <div className="flex gap-3 items-start" role="status">
+      <NovaFace className="w-11 h-11 shrink-0 -mt-1" mood="thinking" />
+      <div className="flex-1 rounded-[var(--radius-card)] bg-white border-2 border-line p-4 shadow-[var(--shadow-sheet)]">
+        <ol className="space-y-2">
+          {stages.map((s, i) => {
+            const done = i < stages.length - 1;
+            const waitLeft = s.key === "waiting_quota" && s.data?.seconds ? Math.max(0, Math.ceil(Number(s.data.seconds) - (now - s.at) / 1000)) : null;
+            return (
+              <li key={`${s.key}-${i}`} className={`flex items-center gap-2.5 ${done ? "text-muted" : "text-night font-bold"}`} dir="auto">
+                <span className={`w-6 h-6 rounded-full grid place-items-center text-xs shrink-0 ${done ? "bg-leaf text-white" : "bg-ink-soft"}`} aria-hidden>
+                  {done ? "✓" : (
+                    <span className="flex gap-0.5">
+                      <span className="ink-dot w-1 h-1 rounded-full bg-ink" />
+                      <span className="ink-dot w-1 h-1 rounded-full bg-ink [animation-delay:.15s]" />
+                      <span className="ink-dot w-1 h-1 rounded-full bg-ink [animation-delay:.3s]" />
+                    </span>
+                  )}
+                </span>
+                <span>
+                  {t(lang, `s_${s.key}`)}
+                  {s.key === "queued" && s.data?.position ? ` · ${t(lang, "position")} ${s.data.position}` : ""}
+                  {waitLeft !== null ? ` · ${waitLeft}${t(lang, "seconds")}` : ""}
+                </span>
+              </li>
+            );
+          })}
+        </ol>
+        <div className="mt-3 h-2 rounded-full bg-paper-deep overflow-hidden" aria-hidden>
+          <div
+            className={`h-full rounded-full transition-[width] duration-500 ${current?.key === "thinking_deep" ? "bg-ink" : "bg-marker"}`}
+            style={{ width: `${Math.min(95, 12 + elapsed * (current?.key === "thinking_deep" ? 6 : 14))}%` }}
+          />
+        </div>
+        <p className="mt-1 text-xs text-muted tabular-nums">{elapsed.toFixed(1)}s</p>
+      </div>
+    </div>
   );
 }
 
 export default function Home() {
   return (
-    <Suspense fallback={<div className="p-10 text-center">Loading EdNova...</div>}>
-      <ChatContent />
+    <Suspense fallback={<div className="cahier flex-1" />}>
+      <ChatPage />
     </Suspense>
   );
 }
